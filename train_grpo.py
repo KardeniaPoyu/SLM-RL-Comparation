@@ -40,12 +40,18 @@ def get_per_token_logps(logits, input_ids):
 
 def train():
     os.makedirs('logs', exist_ok=True)
+    
+    # 初始化 CSV 日志
     log_file = open('logs/grpo_metrics.csv', 'w', newline='')
     csv_writer = csv.writer(log_file)
     csv_writer.writerow([
         "step", "success_rate", "policy_entropy",
         "kl_div", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment"
     ])
+    
+    # 初始化 Response 日志
+    response_file = open('logs/grpo_responses.txt', 'w', encoding='utf-8')
+    response_file.write("=== GRPO Training Responses Log ===\n\n")
     
     env = Arithmetic24Env()
     model, tokenizer = load_model_and_tokenizer(with_value_head=False)
@@ -67,7 +73,7 @@ def train():
     ppo_epochs = 1
     
     gen_kwargs = {
-        "max_new_tokens": 160, # 给足空间防止截断
+        "max_new_tokens": 256, # 给足空间防止截断
         "temperature": 0.8,
         "do_sample": True,
         "pad_token_id": tokenizer.pad_token_id,
@@ -104,13 +110,16 @@ def train():
                 resp_tensors = outputs[:, q_len:]
                 responses = tokenizer.batch_decode(resp_tensors, skip_special_tokens=True)
 
+                # 保存 Response 到文件
+                for idx, resp in enumerate(responses):
+                    response_file.write(f"Step {step} - Sample {idx}:\n")
+                    response_file.write(f"{resp}\n")
+                    response_file.write("-" * 80 + "\n")
+                response_file.flush()
+
                 if step == 0: 
                     print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
                 
-                # 给人看的心跳日志（不用存入 CSV）
-                has_thk, ext_expr = env._parse_output(responses[0])
-                print(f"  -> [进度打卡] Step {step} 算完 | 提取到: '{ext_expr}' | 包含</think>: {has_thk}")
-
                 group_rewards = []
                 corrects = 0
                 for r in responses:
@@ -238,6 +247,13 @@ def train():
                 # 清空篮子，迎接下一个 8 步
                 metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0}
                 update_step += 1
+    
+    # 关闭文件
+    log_file.close()
+    response_file.close()
+    print(f"\n=== GRPO 训练完成 ===")
+    print(f"指标已保存到: logs/grpo_metrics.csv")
+    print(f"响应已保存到: logs/grpo_responses.txt")
 
 if __name__ == "__main__":
     print("=== GRPO 训练开始 ===")

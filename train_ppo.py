@@ -43,12 +43,18 @@ def collator(data):
 
 def train():
     os.makedirs('logs', exist_ok=True)
+    
+    # 初始化 CSV 日志
     log_file = open('logs/ppo_metrics.csv', 'w', newline='')
     csv_writer = csv.writer(log_file)
     csv_writer.writerow([
         "step", "success_rate", "value_loss", "policy_entropy",
         "kl_div", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment"
     ])
+    
+    # 初始化 Response 日志
+    response_file = open('logs/ppo_responses.txt', 'w', encoding='utf-8')
+    response_file.write("=== PPO Training Responses Log ===\n\n")
     
     env = Arithmetic24Env()
     model, tokenizer = load_model_and_tokenizer(with_value_head=True)
@@ -106,7 +112,7 @@ def train():
         "top_p": 1.0,
         "do_sample": True,
         "pad_token_id": tokenizer.pad_token_id,
-        "max_new_tokens": 160, # 【对齐】与 GRPO 的 160 保持绝对一致
+        "max_new_tokens": 256, # 【对齐】与 GRPO 的 256 保持绝对一致
         "temperature": 0.8,
     }
     
@@ -125,6 +131,13 @@ def train():
             )
             
         responses = tokenizer.batch_decode(response_tensors, skip_special_tokens=True)
+        
+        # 保存 Response 到文件
+        for idx, resp in enumerate(responses):
+            response_file.write(f"Update {step} - Sample {idx}:\n")
+            response_file.write(f"{resp}\n")
+            response_file.write("-" * 80 + "\n")
+        response_file.flush()
         
         if step == 0:
             print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
@@ -168,6 +181,13 @@ def train():
         
         torch.cuda.empty_cache()
         gc.collect()
+    
+    # 关闭文件
+    log_file.close()
+    response_file.close()
+    print(f"\n=== PPO 训练完成 ===")
+    print(f"指标已保存到: logs/ppo_metrics.csv")
+    print(f"响应已保存到: logs/ppo_responses.txt")
 
 if __name__ == "__main__":
     print("=== PPO 训练开始 ===")

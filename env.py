@@ -7,28 +7,38 @@ class Arithmetic24Env:
         self.transformations = standard_transformations + (implicit_multiplication_application,)
         
     def get_prompt(self, nums_str):
-        # 【修复1】使用极简版示范，逼迫模型用最少字数完成思考，防止 Token 被截断
-        return f"""You are a math expert solving the 24-point game.
-Use exactly these four numbers to make 24 using +, -, *, /, and parentheses.
-Keep your thoughts extremely short inside <think></think>, then output the math expression.
+        return f"""你是一个解决24点游戏的数学专家。
+请使用给定的四个数字，通过加(+)、减(-)、乘(*)、除(/)和括号，计算出24。每个数字必须且只能使用一次。
 
-Example:
-Input: 2, 3, 6, 8
-Output:
+【严格规则】
+1. 必须在 <think></think> 标签内简短地写出计算过程。
+2. 在 </think> 之后，必须且只能输出一个数学表达式，不能有任何其他内容！
+3. 绝对不能输出任何汉字、英文字母或如何解释说明！只准输出纯数学公式！
+4. 一个完整的答案=一对<think>标签+一个表达式。不能有多对标签！
+5. 表达式不能包含任何计算步骤（如 3*6=18）。只能是最终公式（如 3*6+8-2）。
+
+正确格式示例：
 <think>
-3 * 6 = 18
-18 + 8 = 26
-26 - 2 = 24
+3乘以6等于18
+18加上8等于26
+26减去2等于24
 </think>
 3 * 6 + 8 - 2
 
-Input: {nums_str}
-Output:
+错误格式示例（不要这样做）：
+❌ <think>计算</think>8 * 3 = 24 </think>【多个标签】
+❌ <think>推理</think>我认为答案是 8 * 3【有英文】
+❌ <think>推理</think>8*3=24【包含等号】
+❌ <think>推理</think>8*3 </think>这是答案【多余文字】
+
+输入：{nums_str}
+输出：
 <think>
 """
         
     def _parse_output(self, text):
         has_think = "</think>" in text
+        think_count = text.count("</think>")
         
         if has_think:
             # 【核心修复】：切分后取索引 [1]，即第一个 </think> 紧跟的内容
@@ -43,8 +53,9 @@ Output:
             # 没输出 </think>，取最后一行兜底
             lines = [line.strip() for line in text.strip().split('\n') if line.strip()]
             pred_expr = lines[-1] if lines else ""
-            
-        return has_think, pred_expr
+        
+        # 【新增】返回</think>的出现次数，用于检测多标签问题
+        return has_think, pred_expr, think_count
 
     def _verify_expression(self, expr_str, target_nums):
         if not expr_str:
@@ -97,29 +108,88 @@ Output:
 
     def compute_reward(self, input_nums_str, output_text):
         target_nums = [n.strip() for n in input_nums_str.split(',')]
-        has_think, pred_expr = self._parse_output(output_text)
+        has_think, pred_expr, think_count = self._parse_output(output_text)
         
         reward = 0.0
         
-        # 格式分
+        # ==========================================
+        # 【阶段1】：格式检查（严格）
+        # ==========================================
+        
+        # 1.1 检查是否有多个</think>标签（严重违规）
+        if think_count > 1:
+            # 模型生成了多个</think>标签，说明没理解独一无二的要求
+            reward -= 1.0
+            return reward, False
+        
+        # 1.2 基础格式奖励
         if has_think:
             reward += 0.1
-            
-        # 【新增】：严厉惩罚“话痨”行为，逼迫模型学会输出 EOS
-        if output_text.count("</think>") > 1 or "Explanation:" in output_text:
-            reward -= 0.5 
-            
+        
+        # 1.3 检查响应总长度（防止模型废话过多）
+        # 正常格式：<think>推理(~50-100字)</think> + 表达式(~30字) = ~150字左右
+        # 如果超过300字，说明模型生成了过多无关内容
+        if len(output_text.strip()) > 400:
+            reward -= 0.3
+        
+        # ==========================================
+        # 【阶段2】：表达式提取和初步检查
+        # ==========================================
+        
+        # 2.1 判空拦截
         if not pred_expr:
             reward -= 0.5
             return reward, False
-            
-        # 逻辑分验证
+        
+        # 2.2 检查表达式中是否包含多个等号（多步骤计算的症状）
+        # 规则规定只能输出单个表达式，如"3 * 6 + 8 - 2"，不能是"3 * 6 = 18; 18 + 8 = 26"
+        equals_count = pred_expr.count('=')
+        if equals_count > 0:
+            # 只要有等号，说明模型输出的是多步计算而不是单个表达式
+            reward -= 0.6
+            return reward, False
+        
+        # 2.3 【核心增强】：全文字拦截器
+        # 检查提取到的表达式中是否包含汉字 (\u4e00-\u9fa5) 或英文字母 (a-zA-Z)
+        if re.search(r'[\u4e00-\u9fa5a-zA-Z]', pred_expr):
+            # 只要包含任何废话，直接扣大分，且不进行后续逻辑校验
+            reward -= 1.0 
+            return reward, False
+        
+        # 2.4 检查表达式长度是否合理
+        # 正常的24点表达式应该在20-80字符之间
+        if len(pred_expr) > 100:
+            # 表达式过长，可能包含了多步计算或其他垃圾内容
+            reward -= 0.4
+            # 继续检查数学逻辑
+        elif len(pred_expr) < 3:
+            # 表达式过短，肯定不对
+            reward -= 0.3
+            return reward, False
+        
+        # ==========================================
+        # 【阶段3】：逻辑分验证
+        # ==========================================
+        
         is_correct, reason = self._verify_expression(pred_expr, target_nums)
         if is_correct:
             reward += 1.0
         else:
-            if reason in ["Math error", "Parse error", "Used wrong numbers", "Empty expression"]:
+            # 只要进到这里，说明格式是对的（纯公式），但数学逻辑错了
+            if reason == "Math error":
                 reward -= 0.5
+            elif reason == "Parse error":
+                reward -= 0.4
+            elif reason == "Used wrong numbers":
+                reward -= 0.5
+            elif reason == "Empty expression":
+                reward -= 0.5
+            elif reason == "Invalid characters":
+                reward -= 0.6
+            elif reason == "Exponentiation not allowed":
+                reward -= 0.6
+            else:
+                reward -= 0.3
                 
         return reward, is_correct
 
@@ -127,12 +197,30 @@ if __name__ == "__main__":
     env = Arithmetic24Env()
     prompt = env.get_prompt("3, 3, 8, 8")
     print("Prompt Preview:\n", prompt)
+    print("\n" + "="*80)
+    print("测试改进的奖励函数")
+    print("="*80)
     
-    # 模拟大模型实际的输出行为：开头不带 <think>，因为 Prompt 已经替它写了
-    sample_out = "\n8 / (3 - 8/3) = 8 / (1/3) = 24\n</think>\n8 / (3 - 8/3)"
+    # 测试1：正确答案
+    sample_out = "</think>\n8 / (3 - 8/3)"
     reward, is_correct = env.compute_reward("3, 3, 8, 8", sample_out)
-    print(f"\nSample OK Output -> Reward: {reward}, Correct: {is_correct}")
+    print(f"\n✅ 正确答案: '8 / (3 - 8/3)'")
+    print(f"   奖励: {reward:.2f}, 正确: {is_correct}")
 
-    sample_out_bad = "\n8 * 3 = 24\n</think>\n8 * 3"
+    # 测试2：错误的数字
+    sample_out_bad = "</think>\n8 * 3"
     reward, is_correct = env.compute_reward("3, 3, 8, 8", sample_out_bad)
-    print(f"Sample Bad Numbers Output -> Reward: {reward}, Correct: {is_correct}")
+    print(f"\n❌ 错误数字: '8 * 3' (应该用3, 3, 8, 8)")
+    print(f"   奖励: {reward:.2f}, 正确: {is_correct}")
+    
+    # 测试3：包含等号（不规范格式）
+    sample_out_with_equals = "</think>\n8 / (3 - 8/3) = 24"
+    reward, is_correct = env.compute_reward("3, 3, 8, 8", sample_out_with_equals)
+    print(f"\n⚠️  包含等号: '8 / (3 - 8/3) = 24'")
+    print(f"   奖励: {reward:.2f}, 正确: {is_correct}")
+    
+    # 测试4：多个</think>标签
+    sample_out_multiple_tags = "</think>\n计算过程</think>\n8 / (3 - 8/3)"
+    reward, is_correct = env.compute_reward("3, 3, 8, 8", sample_out_multiple_tags)
+    print(f"\n❌ 多个标签: '......</think>......</think>......'")
+    print(f"   奖励: {reward:.2f}, 正确: {is_correct}")
