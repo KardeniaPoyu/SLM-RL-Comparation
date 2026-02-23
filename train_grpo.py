@@ -49,6 +49,9 @@ def train():
     
     env = Arithmetic24Env()
     model, tokenizer = load_model_and_tokenizer(with_value_head=False)
+
+    # 【修复 TRL 库缺失属性的 Bug】
+    model.is_peft_model = True
     
     dataset = MathDataset('data/train.csv', tokenizer, env)
     dataloader = DataLoader(dataset, batch_size=1, shuffle=True, collate_fn=lambda x: x)
@@ -63,7 +66,7 @@ def train():
     ppo_epochs = 1
     
     gen_kwargs = {
-        "max_new_tokens": 128, # 统一对齐为 128
+        "max_new_tokens": 128, # 统一对齐为 96
         "temperature": 0.8,
         "do_sample": True,
         "pad_token_id": tokenizer.pad_token_id,
@@ -177,7 +180,16 @@ def train():
                     
             step += 1
             
-            # 满 8 步执行一次实际的权重更新
+            # 【关键修改 1：每次反向传播完，立刻清空张量释放显存】
+            avg_succ = sum([r["success_rate"] for r in rollouts]) / len(rollouts)
+            avg_adv = sum([r["reward_mean"] for r in rollouts]) / len(rollouts)
+            avg_adv_std = sum([r["reward_std"] for r in rollouts]) / len(rollouts)
+            
+            rollouts.clear() 
+            torch.cuda.empty_cache()
+            gc.collect()
+
+            # 【关键修改 2：满 8 步，执行一次底层权重更新，并写入日志】
             if step % accumulation_steps == 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 second_moment = 0.0
@@ -190,25 +202,17 @@ def train():
                     second_moment /= param_count
                     
                 optimizer.step()
-                optimizer.zero_grad() # 更新完毕后清零梯度
+                optimizer.zero_grad() # 更新完毕后，清空底层累积的梯度
                 
-                # 记录更新时的数据
-                avg_succ = sum([r["success_rate"] for r in rollouts]) / len(rollouts)
-                avg_adv = sum([r["reward_mean"] for r in rollouts]) / len(rollouts)
-                avg_adv_std = sum([r["reward_std"] for r in rollouts]) / len(rollouts)
-                
+                # 记录这 8 步的平均统计数据
                 csv_writer.writerow([
-                    update_step, avg_succ, total_entropy/len(rollouts), total_kl/len(rollouts),
+                    update_step, avg_succ, total_entropy, total_kl,
                     avg_adv, avg_adv_std, grad_norm.item(), second_moment
                 ])
                 log_file.flush()
                 
-                print(f"Update {update_step} (Step {step}) | Succ: {avg_succ:.2f} | Adv: {avg_adv:.2f} | KL: {total_kl/len(rollouts):.4f} | |g|: {grad_norm.item():.4f}")
+                print(f"Update {update_step} (Step {step}) | Succ: {avg_succ:.2f} | Adv: {avg_adv:.2f} | KL: {total_kl:.4f} | |g|: {grad_norm.item():.4f}")
                 update_step += 1
-            
-            rollouts.clear() 
-            torch.cuda.empty_cache()
-            gc.collect()
 
 if __name__ == "__main__":
     print("=== GRPO 训练开始 ===")

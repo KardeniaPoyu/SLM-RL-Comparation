@@ -52,15 +52,20 @@ def train():
     
     env = Arithmetic24Env()
     model, tokenizer = load_model_and_tokenizer(with_value_head=True)
+
+    # 【修复 TRL 库缺失属性的 Bug】
+    model.is_peft_model = True
     
     config = PPOConfig(
-        output_dir="logs/ppo_model",
         learning_rate=1e-5,
-        mini_batch_size=1, 
-        batch_size=8,      
-        gradient_accumulation_steps=8, 
-        num_ppo_epochs=1,
-        max_grad_norm=1.0,
+        batch_size=8,
+        mini_batch_size=1,
+        gradient_accumulation_steps=8,
+        optimize_device_cache=True, # 0.8.6 支持此选项以节省显存
+        early_stopping=False,
+        target_kl=0.1,
+        ppo_epochs=1,
+        seed=42
     )
     
     dataset = MathDataset('data/train.csv', tokenizer, env)
@@ -68,15 +73,15 @@ def train():
     ppo_trainer = PPOTrainer(
         config=config,
         model=model,
-        ref_model=None, 
+        ref_model=None, # 如果设为 None，TRL 会自动创建参考模型
         tokenizer=tokenizer,
         dataset=dataset,
         data_collator=collator
     )
     
     # 【黑科技：拦截器】在TRL清空梯度前抢救“梯度二阶矩”数据
-    metric_cache = {"second_moment": 0.0, "total_norm": 0.0}
-    original_step = ppo_trainer.optimizer.step
+    if hasattr(ppo_trainer, "optimizer"):
+        original_step = ppo_trainer.optimizer.step
     
     def hooked_optimizer_step(*args, **kwargs):
         sm = 0.0
