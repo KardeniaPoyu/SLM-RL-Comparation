@@ -7,7 +7,26 @@ class Arithmetic24Env:
         self.transformations = standard_transformations + (implicit_multiplication_application,)
         
     def get_prompt(self, nums_str):
-        return f"Input: {nums_str}.\nOutput: <think>\n"
+        return f"""You are a math expert. Solve the 24-point game.
+You must use exactly these four numbers to make 24 using +, -, *, /, and parentheses.
+You must wrap your thinking process inside <think> and </think> tags, and then output the final valid math expression on the last line.
+
+Example:
+Input: 2, 3, 6, 8
+Output:
+<think>
+I need to make 24.
+Let's try: 3 - 2 = 1.
+So 6 * 8 / (3 - 2) = 48 / 1 = 48.
+Wait, let's try 3 * 6 = 18. 18 + 8 = 26. 26 - 2 = 24.
+Yes! 3 * 6 + 8 - 2 = 24.
+</think>
+3 * 6 + 8 - 2
+
+Input: {nums_str}
+Output:
+<think>
+"""
         
     def _parse_output(self, text):
         # Match <think>...</think> and extract the expression after it

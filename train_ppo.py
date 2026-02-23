@@ -1,6 +1,9 @@
+import os
+os.environ["HF_HOME"] = "E:/hf_cache" 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import torch
 import csv
-import os
 import gc
 from torch.utils.data import Dataset
 from trl import PPOTrainer, PPOConfig
@@ -22,7 +25,6 @@ class MathDataset(Dataset):
                 prompt = env.get_prompt(nums)
                 self.prompts.append(prompt)
                 
-                # Tokenize 
                 tokens = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
                 self.queries.append(tokens)
                 
@@ -51,17 +53,13 @@ def train():
     env = Arithmetic24Env()
     model, tokenizer = load_model_and_tokenizer(with_value_head=True)
     
-    # Aggressive small VRAM settings
     config = PPOConfig(
-        model_name="Qwen/Qwen2.5-0.5B-Instruct",
+        output_dir="logs/ppo_model",
         learning_rate=1e-5,
-        mini_batch_size=2,
-        batch_size=8,
-        gradient_accumulation_steps=4,
-        ppo_epochs=4,
-        early_stopping=True,
-        target_kl=0.1,
-        optimize_cuda_cache=True,
+        mini_batch_size=1, 
+        batch_size=8,      
+        gradient_accumulation_steps=8, 
+        num_ppo_epochs=1,
         max_grad_norm=1.0,
     )
     
@@ -70,11 +68,31 @@ def train():
     ppo_trainer = PPOTrainer(
         config=config,
         model=model,
-        ref_model=None, # TRL will automatically treat no ref model appropriately with PEFT
+        ref_model=None, 
         tokenizer=tokenizer,
         dataset=dataset,
         data_collator=collator
     )
+    
+    # 【黑科技：拦截器】在TRL清空梯度前抢救“梯度二阶矩”数据
+    metric_cache = {"second_moment": 0.0, "total_norm": 0.0}
+    original_step = ppo_trainer.optimizer.step
+    
+    def hooked_optimizer_step(*args, **kwargs):
+        sm = 0.0
+        tn = 0.0
+        pc = 0
+        for p in ppo_trainer.model.parameters():
+            if p.grad is not None:
+                sm += (p.grad.data ** 2).mean().item()
+                tn += p.grad.data.norm(2).item() ** 2
+                pc += 1
+        if pc > 0:
+            metric_cache["second_moment"] = sm / pc
+            metric_cache["total_norm"] = tn ** 0.5
+        return original_step(*args, **kwargs)
+        
+    ppo_trainer.optimizer.step = hooked_optimizer_step
     
     gen_kwargs = {
         "min_length": -1,
@@ -82,7 +100,7 @@ def train():
         "top_p": 1.0,
         "do_sample": True,
         "pad_token_id": tokenizer.pad_token_id,
-        "max_new_tokens": 128,
+        "max_new_tokens": 128, # 【对齐】与GRPO的128保持一致
         "temperature": 0.8,
     }
     
@@ -92,8 +110,7 @@ def train():
         prompts = batch["prompt"]
         input_nums = batch["input_nums"]
         
-        # Generate with inference_mode to save VRAM
-        with torch.inference_mode():
+        with torch.no_grad():
             response_tensors = ppo_trainer.generate(
                 [q.to(ppo_trainer.accelerator.device) for q in query_tensors], 
                 return_prompt=False, 
@@ -102,7 +119,6 @@ def train():
             
         responses = tokenizer.batch_decode(response_tensors, skip_special_tokens=True)
         
-        # Calculate rewards
         rewards = []
         correct_count = 0
         for nums, resp in zip(input_nums, responses):
@@ -111,34 +127,21 @@ def train():
             if is_corr:
                 correct_count += 1
                 
-        # Perform PPO step
+        # TRL 执行这一步时，会触发我们的 hooked_optimizer_step
         stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
         
-        # Record metrics
         success_rate = correct_count / len(rewards)
         val_loss = stats.get("ppo/loss/value", 0.0)
         policy_entropy = stats.get("ppo/policy/entropy", 0.0)
         kl = stats.get("ppo/policy/approxkl", 0.0)
-        
         returns = stats.get("ppo/returns/mean", 0.0)
         vpred = stats.get("ppo/val/vpred", 0.0)
         mean_adv = returns - vpred
         adv_std = stats.get("ppo/val/error", 0.0) 
         
-        # Track gradient norms & second moments
-        total_norm = 0.0
-        second_moment = 0.0
-        param_count = 0
-        for p in model.parameters():
-            if p.grad is not None:
-                param_norm = p.grad.data.norm(2)
-                total_norm += param_norm.item() ** 2
-                second_moment += (p.grad.data ** 2).mean().item()
-                param_count += 1
-                
-        total_norm = total_norm ** 0.5
-        if param_count > 0:
-            second_moment = second_moment / param_count
+        # 直接从拦截器的缓存中读取论文需要的数据
+        total_norm = metric_cache["total_norm"]
+        second_moment = metric_cache["second_moment"]
             
         csv_writer.writerow([
             step, success_rate, val_loss, policy_entropy, kl, mean_adv, adv_std, total_norm, second_moment
@@ -146,11 +149,12 @@ def train():
         log_file.flush()
         
         mean_reward = torch.stack(rewards).mean().item()
-        print(f"Step {step} | Succ: {success_rate:.2f} | R: {mean_reward:.2f} | KL: {kl:.4f} | PLoss: {stats.get('ppo/loss/policy', 0.0):.4f} | VLoss: {val_loss:.4f} | |g|: {total_norm:.4f}")
+        print(f"Update {step} | Succ: {success_rate:.2f} | R: {mean_reward:.2f} | KL: {kl:.4f} | VLoss: {val_loss:.4f} | |g|: {total_norm:.4f}")
         step += 1
         
         torch.cuda.empty_cache()
         gc.collect()
 
 if __name__ == "__main__":
+    print("=== PPO 训练开始 ===")
     train()

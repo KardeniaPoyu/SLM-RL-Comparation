@@ -1,8 +1,11 @@
+import os
+os.environ["HF_HOME"] = "E:/hf_cache" 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 import csv
-import os
 import gc
 from model_utils import load_model_and_tokenizer
 from env import Arithmetic24Env
@@ -48,17 +51,19 @@ def train():
     model, tokenizer = load_model_and_tokenizer(with_value_head=False)
     
     dataset = MathDataset('data/train.csv', tokenizer, env)
-    dataloader = DataLoader(dataset, batch_size=2, shuffle=True, collate_fn=lambda x: x)
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=True, collate_fn=lambda x: x)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
     
+    # 核心对齐参数
     G = 4
+    accumulation_steps = 8 # 攒够8道题更新一次，等效于 batch_size=8
     beta = 0.04
     clip_eps = 0.2
-    ppo_epochs = 2 
+    ppo_epochs = 1
     
     gen_kwargs = {
-        "max_new_tokens": 128,
+        "max_new_tokens": 128, # 统一对齐为 128
         "temperature": 0.8,
         "do_sample": True,
         "pad_token_id": tokenizer.pad_token_id,
@@ -66,7 +71,10 @@ def train():
     }
     
     step = 0
+    update_step = 0
     device = model.device
+    
+    optimizer.zero_grad() # 初始化梯度清零
     
     for epoch in range(1):
         for batch in dataloader:
@@ -77,17 +85,17 @@ def train():
             for item in batch:
                 q_tensor = item["query"].to(device)
                 num_str = item["input_nums"]
-                
-                # Repeat query G times
                 q_tensors = q_tensor.unsqueeze(0).repeat(G, 1)
                 
-                with torch.inference_mode():
+                with torch.no_grad():
                     outputs = model.generate(q_tensors, **gen_kwargs)
                 
                 q_len = q_tensors.shape[1]
                 resp_tensors = outputs[:, q_len:]
-                
                 responses = tokenizer.batch_decode(resp_tensors, skip_special_tokens=True)
+
+                if step == 0: 
+                    print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
                 
                 group_rewards = []
                 corrects = 0
@@ -97,7 +105,6 @@ def train():
                     if is_correct: corrects += 1
                     
                 group_rewards = torch.tensor(group_rewards, dtype=torch.float32, device=device)
-                
                 mean_r = group_rewards.mean()
                 std_r = group_rewards.std() + 1e-8
                 advantages = (group_rewards - mean_r) / std_r
@@ -105,20 +112,23 @@ def train():
                 input_ids = outputs
                 attention_mask = (input_ids != tokenizer.pad_token_id).long()
                 
-                with torch.inference_mode():
-                    logits = model(input_ids, attention_mask=attention_mask).logits
-                    old_log_probs = get_per_token_logps(logits[:, q_len-1:-1, :], resp_tensors)
-                    
-                    with model.disable_adapter():
-                        ref_logits = model(input_ids, attention_mask=attention_mask).logits
-                        ref_log_probs = get_per_token_logps(ref_logits[:, q_len-1:-1, :], resp_tensors)
+                with torch.no_grad():
+                    with torch.autocast(device_type="cuda", dtype=torch.float16):
+                        logits = model(input_ids, attention_mask=attention_mask).logits
+                        old_log_probs = get_per_token_logps(logits[:, q_len-1:-1, :], resp_tensors).detach()
+                        del logits
+                        
+                        with model.disable_adapter():
+                            ref_logits = model(input_ids, attention_mask=attention_mask).logits
+                            ref_log_probs = get_per_token_logps(ref_logits[:, q_len-1:-1, :], resp_tensors).detach()
+                            del ref_logits
                 
                 rollouts.append({
                     "input_ids": input_ids,
                     "attention_mask": attention_mask,
                     "q_len": q_len,
                     "resp_tensors": resp_tensors,
-                    "advantages": advantages,
+                    "advantages": advantages.detach(),
                     "old_log_probs": old_log_probs,
                     "ref_log_probs": ref_log_probs,
                     "reward_mean": mean_r.item(),
@@ -130,11 +140,8 @@ def train():
             model.train()
             
             for _ in range(ppo_epochs):
-                total_loss = 0
-                total_kl = 0
                 total_entropy = 0
-                
-                optimizer.zero_grad()
+                total_kl = 0
                 
                 for r in rollouts:
                     input_ids = r["input_ids"]
@@ -143,13 +150,13 @@ def train():
                     resp_tensors = r["resp_tensors"]
                     advantages = r["advantages"].unsqueeze(1)
                     
-                    logits = model(input_ids, attention_mask=attention_mask).logits
-                    log_probs = get_per_token_logps(logits[:, q_len-1:-1, :], resp_tensors)
+                    with torch.autocast(device_type="cuda", dtype=torch.float16):
+                        logits = model(input_ids, attention_mask=attention_mask).logits
+                        log_probs = get_per_token_logps(logits[:, q_len-1:-1, :], resp_tensors)
+                        del logits
                     
                     loss_mask = (resp_tensors != tokenizer.pad_token_id).float()
-                    
                     ratio = torch.exp(log_probs - r["old_log_probs"])
-                    
                     kl = torch.exp(r["ref_log_probs"] - log_probs) - (r["ref_log_probs"] - log_probs) - 1
                     
                     surr1 = ratio * advantages
@@ -159,8 +166,8 @@ def train():
                     loss = ((policy_loss + beta * kl) * loss_mask).sum(dim=1) / loss_mask.sum(dim=1)
                     loss = loss.mean()
                     
-                    # Accumulate gradients (effectively average over batch)
-                    loss = loss / len(rollouts)
+                    # 梯度累积：除以 accumulation_steps 保证梯度幅值稳定
+                    loss = loss / accumulation_steps
                     loss.backward()
                     
                     prob = torch.exp(log_probs)
@@ -168,8 +175,11 @@ def train():
                     total_entropy += entropy.mean().item()
                     total_kl += (kl * loss_mask).sum(dim=1).mean().item()
                     
+            step += 1
+            
+            # 满 8 步执行一次实际的权重更新
+            if step % accumulation_steps == 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                
                 second_moment = 0.0
                 param_count = 0
                 for p in model.parameters():
@@ -180,22 +190,26 @@ def train():
                     second_moment /= param_count
                     
                 optimizer.step()
+                optimizer.zero_grad() # 更新完毕后清零梯度
                 
-            avg_succ = sum([r["success_rate"] for r in rollouts]) / len(rollouts)
-            avg_adv = sum([r["reward_mean"] for r in rollouts]) / len(rollouts)
-            avg_adv_std = sum([r["reward_std"] for r in rollouts]) / len(rollouts)
+                # 记录更新时的数据
+                avg_succ = sum([r["success_rate"] for r in rollouts]) / len(rollouts)
+                avg_adv = sum([r["reward_mean"] for r in rollouts]) / len(rollouts)
+                avg_adv_std = sum([r["reward_std"] for r in rollouts]) / len(rollouts)
+                
+                csv_writer.writerow([
+                    update_step, avg_succ, total_entropy/len(rollouts), total_kl/len(rollouts),
+                    avg_adv, avg_adv_std, grad_norm.item(), second_moment
+                ])
+                log_file.flush()
+                
+                print(f"Update {update_step} (Step {step}) | Succ: {avg_succ:.2f} | Adv: {avg_adv:.2f} | KL: {total_kl/len(rollouts):.4f} | |g|: {grad_norm.item():.4f}")
+                update_step += 1
             
-            csv_writer.writerow([
-                step, avg_succ, total_entropy/len(rollouts), total_kl/len(rollouts),
-                avg_adv, avg_adv_std, grad_norm.item(), second_moment
-            ])
-            log_file.flush()
-            
-            print(f"Step {step} | Succ: {avg_succ:.2f} | Adv: {avg_adv:.2f} | KL: {total_kl/len(rollouts):.4f} | |g|: {grad_norm.item():.4f}")
-            step += 1
-            
+            rollouts.clear() 
             torch.cuda.empty_cache()
             gc.collect()
 
 if __name__ == "__main__":
+    print("=== GRPO 训练开始 ===")
     train()
