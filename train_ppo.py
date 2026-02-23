@@ -56,15 +56,13 @@ def train():
     # 【修复 TRL 库缺失属性的 Bug】
     model.is_peft_model = True
     
+    # 【极致求稳配置】：移除容易因 TRL 版本不同而报错的 epochs 参数，使用默认值
     config = PPOConfig(
         learning_rate=1e-5,
         batch_size=8,
         mini_batch_size=1,
         gradient_accumulation_steps=8,
-        optimize_device_cache=True, # 0.8.6 支持此选项以节省显存
-        early_stopping=False,
         target_kl=0.1,
-        ppo_epochs=1,
         seed=42
     )
     
@@ -73,11 +71,14 @@ def train():
     ppo_trainer = PPOTrainer(
         config=config,
         model=model,
-        ref_model=None, # 如果设为 None，TRL 会自动创建参考模型
+        ref_model=None, 
         tokenizer=tokenizer,
         dataset=dataset,
         data_collator=collator
     )
+    
+    # 【修复 Bug】：在此处提前定义指标缓存篮子！
+    metric_cache = {"second_moment": 0.0, "total_norm": 0.0}
     
     # 【黑科技：拦截器】在TRL清空梯度前抢救“梯度二阶矩”数据
     if hasattr(ppo_trainer, "optimizer"):
@@ -105,11 +106,12 @@ def train():
         "top_p": 1.0,
         "do_sample": True,
         "pad_token_id": tokenizer.pad_token_id,
-        "max_new_tokens": 128, # 【对齐】与GRPO的128保持一致
+        "max_new_tokens": 160, # 【对齐】与 GRPO 的 160 保持绝对一致
         "temperature": 0.8,
     }
     
-    step = 0
+    # PPO 的一个 step 自动处理 batch_size=8 的数据，直接等效于 GRPO 的 Update
+    step = 0 
     for epoch, batch in enumerate(ppo_trainer.dataloader):
         query_tensors = batch["query"]
         prompts = batch["prompt"]
@@ -124,6 +126,13 @@ def train():
             
         responses = tokenizer.batch_decode(response_tensors, skip_special_tokens=True)
         
+        if step == 0:
+            print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
+            
+        # PPO 专属心跳日志
+        has_thk, ext_expr = env._parse_output(responses[0])
+        print(f"  -> [进度打卡] Update {step} 采样完毕 | 样本1提取到: '{ext_expr}' | 包含</think>: {has_thk}")
+        
         rewards = []
         correct_count = 0
         for nums, resp in zip(input_nums, responses):
@@ -132,7 +141,7 @@ def train():
             if is_corr:
                 correct_count += 1
                 
-        # TRL 执行这一步时，会触发我们的 hooked_optimizer_step
+        # TRL 执行这一步时，会触发我们的 hooked_optimizer_step，同时底层完成 8 次累积
         stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
         
         success_rate = correct_count / len(rewards)

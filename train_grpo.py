@@ -61,12 +61,13 @@ def train():
     # 核心对齐参数
     G = 4
     accumulation_steps = 8 # 攒够8道题更新一次，等效于 batch_size=8
+    
     beta = 0.04
     clip_eps = 0.2
     ppo_epochs = 1
     
     gen_kwargs = {
-        "max_new_tokens": 128, # 统一对齐为 96
+        "max_new_tokens": 160, # 给足空间防止截断
         "temperature": 0.8,
         "do_sample": True,
         "pad_token_id": tokenizer.pad_token_id,
@@ -78,6 +79,12 @@ def train():
     device = model.device
     
     optimizer.zero_grad() # 初始化梯度清零
+    
+    # ====================================================
+    # 【核心修复】：在此处定义指标累加器（小篮子）
+    # 用来收集 8 步的平均数据，以便最真实地画出折线图
+    # ====================================================
+    metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0}
     
     for epoch in range(1):
         for batch in dataloader:
@@ -100,6 +107,10 @@ def train():
                 if step == 0: 
                     print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
                 
+                # 给人看的心跳日志（不用存入 CSV）
+                has_thk, ext_expr = env._parse_output(responses[0])
+                print(f"  -> [进度打卡] Step {step} 算完 | 提取到: '{ext_expr}' | 包含</think>: {has_thk}")
+
                 group_rewards = []
                 corrects = 0
                 for r in responses:
@@ -142,10 +153,10 @@ def train():
             # 2. Optimization Phase
             model.train()
             
+            total_entropy = 0
+            total_kl = 0
+            
             for _ in range(ppo_epochs):
-                total_entropy = 0
-                total_kl = 0
-                
                 for r in rollouts:
                     input_ids = r["input_ids"]
                     attention_mask = r["attention_mask"]
@@ -169,7 +180,7 @@ def train():
                     loss = ((policy_loss + beta * kl) * loss_mask).sum(dim=1) / loss_mask.sum(dim=1)
                     loss = loss.mean()
                     
-                    # 梯度累积：除以 accumulation_steps 保证梯度幅值稳定
+                    # 梯度累积
                     loss = loss / accumulation_steps
                     loss.backward()
                     
@@ -180,16 +191,19 @@ def train():
                     
             step += 1
             
-            # 【关键修改 1：每次反向传播完，立刻清空张量释放显存】
-            avg_succ = sum([r["success_rate"] for r in rollouts]) / len(rollouts)
-            avg_adv = sum([r["reward_mean"] for r in rollouts]) / len(rollouts)
-            avg_adv_std = sum([r["reward_std"] for r in rollouts]) / len(rollouts)
+            # 【完美收集数据】：将这一步的数据放进篮子里
+            metric_acc["succ"] += sum([r["success_rate"] for r in rollouts]) / len(rollouts)
+            metric_acc["adv"] += sum([r["reward_mean"] for r in rollouts]) / len(rollouts)
+            metric_acc["adv_std"] += sum([r["reward_std"] for r in rollouts]) / len(rollouts)
+            metric_acc["kl"] += total_kl
+            metric_acc["entropy"] += total_entropy
             
+            # 及时释放显存
             rollouts.clear() 
             torch.cuda.empty_cache()
             gc.collect()
 
-            # 【关键修改 2：满 8 步，执行一次底层权重更新，并写入日志】
+            # 【满 8 步】：求平均值 -> 更新权重 -> 写入 CSV
             if step % accumulation_steps == 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 second_moment = 0.0
@@ -202,16 +216,27 @@ def train():
                     second_moment /= param_count
                     
                 optimizer.step()
-                optimizer.zero_grad() # 更新完毕后，清空底层累积的梯度
+                optimizer.zero_grad() 
                 
-                # 记录这 8 步的平均统计数据
+                # 计算这 8 步的真实平均值
+                avg_succ = metric_acc["succ"] / accumulation_steps
+                avg_adv = metric_acc["adv"] / accumulation_steps
+                avg_adv_std = metric_acc["adv_std"] / accumulation_steps
+                avg_kl = metric_acc["kl"] / accumulation_steps
+                avg_entropy = metric_acc["entropy"] / accumulation_steps
+                
+                # 完美写入 CSV（用于画图）
                 csv_writer.writerow([
-                    update_step, avg_succ, total_entropy, total_kl,
+                    update_step, avg_succ, avg_entropy, avg_kl,
                     avg_adv, avg_adv_std, grad_norm.item(), second_moment
                 ])
                 log_file.flush()
                 
-                print(f"Update {update_step} (Step {step}) | Succ: {avg_succ:.2f} | Adv: {avg_adv:.2f} | KL: {total_kl:.4f} | |g|: {grad_norm.item():.4f}")
+                # 终端汇报 Update
+                print(f"Update {update_step} (Step {step}) | Succ: {avg_succ:.2f} | Adv: {avg_adv:.2f} | KL: {avg_kl:.4f} | |g|: {grad_norm.item():.4f}")
+                
+                # 清空篮子，迎接下一个 8 步
+                metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0}
                 update_step += 1
 
 if __name__ == "__main__":
