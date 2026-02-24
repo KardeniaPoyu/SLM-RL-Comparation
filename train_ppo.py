@@ -67,9 +67,9 @@ def train():
     # ==========================================
     config = PPOConfig(
         learning_rate=1e-5,
-        batch_size=256,                 # 【对齐】每次 Update 收集 256 个样本 (等效 GRPO 的 G=64 * acc=4)
-        mini_batch_size=4,              # 【防 OOM】每次喂给 GPU 4个样本，T4 显存毫无压力
-        gradient_accumulation_steps=64, # 【对齐】256 / 4 = 64，攒够 64 个 mini_batch 更新一次梯度
+        batch_size=128,                 # 【对齐】GRPO G=32 * bs=4
+        mini_batch_size=8,              # PPO 一次拿 8 条送入模型计算 V 值
+        gradient_accumulation_steps=16, # 【对齐】128 / 8 = 16，攒 16 个更新即 128 个样本
         target_kl=0.1,
         seed=42,
         # --- ⬇️ 必须补充的对齐参数 ⬇️ ---
@@ -114,15 +114,15 @@ def train():
     ppo_trainer.optimizer.step = hooked_optimizer_step
     
     gen_kwargs = {
-        "temperature": 1.2,
+        "temperature": 1.0,
         "top_p": 0.95,
         "do_sample": True,
         "pad_token_id": tokenizer.pad_token_id,
         "eos_token_id": tokenizer.eos_token_id,
-        "max_new_tokens": 128, # 【对齐】与 GRPO 的 128 保持绝对一致
+        "max_new_tokens": 48, # 【对齐】与 GRPO 的 48 保持绝对一致
     }
     
-    # PPO 的一个 step 自动处理 batch_size=256 的数据，直接等效于 GRPO 的 Update
+    # PPO 的一个 step 自动处理 batch_size=128 的数据，直接等效于 GRPO 的一个 128样本(bs=4*G=32)的 Update
     step = 0 
     for epoch, batch in enumerate(ppo_trainer.dataloader):
         query_tensors = batch["query"]
@@ -131,8 +131,9 @@ def train():
         
         with torch.no_grad():
             response_tensors = []
-            for i in range(0, len(query_tensors), 4):
-                batch_q = [q.to(ppo_trainer.accelerator.device) for q in query_tensors[i:i+4]]
+            # 同样防 OOM 生成阶段切块
+            for i in range(0, len(query_tensors), 16):
+                batch_q = [q.to(ppo_trainer.accelerator.device) for q in query_tensors[i:i+16]]
                 batch_resp = ppo_trainer.generate(batch_q, return_prompt=False, **gen_kwargs)
                 response_tensors.extend(batch_resp)
             
