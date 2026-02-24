@@ -57,7 +57,7 @@ def train():
     response_file.write("=== PPO Training Responses Log ===\n\n")
     
     env = Arithmetic24Env()
-    model, tokenizer = load_model_and_tokenizer(with_value_head=True)
+    model, tokenizer = load_model_and_tokenizer(with_value_head=True, lora_resume_path="saved_models/sft_final")
 
     # 【修复 TRL 库缺失属性的 Bug】
     model.is_peft_model = True

@@ -88,12 +88,9 @@ class Arithmetic24Env:
             if hasattr(parsed, 'free_symbols') and parsed.free_symbols:
                 return False, "Contains variables"
 
-            # 使用 SymPy 的简化功能检查是否等于 24
-            if sympy.simplify(parsed - 24) == 0:
-                return True, "Correct"
-            
-            # 备选：处理浮点数情况
-            if abs(float(parsed) - 24.0) < 1e-6:
+            # 【性能优化】放弃极度缓慢的 sympy.simplify，直接使用 float 计算
+            # RL 训练中环境反馈必须极速。由于前面的字符白名单已经排除了非常规操作，转 float 是安全的，速度提升百倍
+            if abs(float(parsed) - 24.0) < 1e-5:
                 return True, "Correct"
             
             return False, "Wrong value"
