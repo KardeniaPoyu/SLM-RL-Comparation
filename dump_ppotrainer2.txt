@@ -1,2 +1,0 @@
-No docstring for __init__, getting class doc:
-PPOTrainer(*args, **kwargs)
