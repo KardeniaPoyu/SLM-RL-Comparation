@@ -62,12 +62,14 @@ def train():
     # 【修复 TRL 库缺失属性的 Bug】
     model.is_peft_model = True
     
-    # 【极致求稳配置】：移除容易因 TRL 版本不同而报错的 epochs 参数，使用默认值
+    # ==========================================
+    # 【核心对齐修改】：对齐 GRPO 的吞吐量并压榨 GPU
+    # ==========================================
     config = PPOConfig(
         learning_rate=1e-5,
-        batch_size=8,
-        mini_batch_size=1,
-        gradient_accumulation_steps=8,
+        batch_size=32,                  # 【对齐】每次 Update 收集 32 个样本 (等效 GRPO 的 G=16 * acc=2)
+        mini_batch_size=4,              # 【防 OOM】每次喂给 GPU 4个样本，T4 显存毫无压力
+        gradient_accumulation_steps=8,  # 【对齐】32 / 4 = 8，攒够 8 个 mini_batch 更新一次梯度
         target_kl=0.1,
         seed=42
     )
@@ -112,11 +114,11 @@ def train():
         "top_p": 1.0,
         "do_sample": True,
         "pad_token_id": tokenizer.pad_token_id,
-        "max_new_tokens": 256, # 【对齐】与 GRPO 的 256 保持绝对一致
+        "max_new_tokens": 128, # 【对齐】与 GRPO 的 128 保持绝对一致
         "temperature": 0.8,
     }
     
-    # PPO 的一个 step 自动处理 batch_size=8 的数据，直接等效于 GRPO 的 Update
+    # PPO 的一个 step 自动处理 batch_size=32 的数据，直接等效于 GRPO 的 Update
     step = 0 
     for epoch, batch in enumerate(ppo_trainer.dataloader):
         query_tensors = batch["query"]
@@ -132,12 +134,14 @@ def train():
             
         responses = tokenizer.batch_decode(response_tensors, skip_special_tokens=True)
         
-        # 保存 Response 到文件
-        for idx, resp in enumerate(responses):
-            response_file.write(f"Update {step} - Sample {idx}:\n")
-            response_file.write(f"{resp}\n")
+        # ==========================================
+        # 【核心对齐修改】：解除 I/O 封印，减少日志写入
+        # ==========================================
+        if step % 40 == 0:
+            response_file.write(f"Update {step} - Sample 0:\n")
+            response_file.write(f"{responses[0]}\n")
             response_file.write("-" * 80 + "\n")
-        response_file.flush()
+            response_file.flush()
         
         if step == 0:
             print(f"\n[模型原始输出观察]:\n{responses[0]}\n")

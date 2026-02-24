@@ -65,15 +65,15 @@ def train():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
     
     # 核心对齐参数
-    G = 4
-    accumulation_steps = 8 # 攒够8道题更新一次，等效于 batch_size=8
+    G = 16
+    accumulation_steps = 2
     
     beta = 0.04
     clip_eps = 0.2
     ppo_epochs = 1
     
     gen_kwargs = {
-        "max_new_tokens": 256, # 给足空间防止截断
+        "max_new_tokens": 128, # 给足空间防止截断
         "temperature": 0.8,
         "do_sample": True,
         "pad_token_id": tokenizer.pad_token_id,
@@ -110,12 +110,12 @@ def train():
                 resp_tensors = outputs[:, q_len:]
                 responses = tokenizer.batch_decode(resp_tensors, skip_special_tokens=True)
 
-                # 保存 Response 到文件
-                for idx, resp in enumerate(responses):
-                    response_file.write(f"Step {step} - Sample {idx}:\n")
-                    response_file.write(f"{resp}\n")
+                # 【提速核心】减少硬盘 I/O：降低记录频率，每次只记 1 个样本观察即可
+                if step % 10 == 0: 
+                    response_file.write(f"Step {step} - Sample 0:\n")
+                    response_file.write(f"{responses[0]}\n")
                     response_file.write("-" * 80 + "\n")
-                response_file.flush()
+                    response_file.flush()
 
                 if step == 0: 
                     print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
