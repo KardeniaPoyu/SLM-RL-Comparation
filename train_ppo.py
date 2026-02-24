@@ -71,7 +71,12 @@ def train():
         mini_batch_size=4,              # 【防 OOM】每次喂给 GPU 4个样本，T4 显存毫无压力
         gradient_accumulation_steps=8,  # 【对齐】32 / 4 = 8，攒够 8 个 mini_batch 更新一次梯度
         target_kl=0.1,
-        seed=42
+        seed=42,
+        # --- ⬇️ 必须补充的对齐参数 ⬇️ ---
+        ppo_epochs=1,          # 【对齐】GRPO 代码里是 for _ in range(ppo_epochs): 且 ppo_epochs=1。TRL 默认是 4，不改的话 PPO 会多更新 4 倍！
+        init_kl_coef=0.04,     # 【对齐】GRPO 代码里 beta = 0.04。
+        adap_kl_ctrl=False,    # 【对齐】TRL 默认会动态调整 KL 系数，必须关闭，强制使用固定的 0.04。
+        cliprange=0.2          # 【对齐】GRPO 里 clip_eps = 0.2。
     )
     
     dataset = MathDataset('data/train.csv', tokenizer, env)
@@ -137,7 +142,7 @@ def train():
         # ==========================================
         # 【核心对齐修改】：解除 I/O 封印，减少日志写入
         # ==========================================
-        if step % 40 == 0:
+        if step % 10 == 0:
             response_file.write(f"Update {step} - Sample 0:\n")
             response_file.write(f"{responses[0]}\n")
             response_file.write("-" * 80 + "\n")
