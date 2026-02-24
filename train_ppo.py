@@ -141,11 +141,7 @@ def train():
         
         if step == 0:
             print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
-            
-        # PPO 专属心跳日志
-        has_thk, ext_expr = env._parse_output(responses[0])
-        print(f"  -> [进度打卡] Update {step} 采样完毕 | 样本1提取到: '{ext_expr}' | 包含</think>: {has_thk}")
-        
+               
         rewards = []
         correct_count = 0
         for nums, resp in zip(input_nums, responses):
@@ -179,9 +175,21 @@ def train():
         print(f"Update {step} | Succ: {success_rate:.2f} | R: {mean_reward:.2f} | KL: {kl:.4f} | VLoss: {val_loss:.4f} | |g|: {total_norm:.4f}")
         step += 1
         
+        if step > 0 and step % 40 == 0:
+            save_dir = f"saved_models/ppo_step_{step}"
+            ppo_trainer.model.save_pretrained(save_dir)
+            tokenizer.save_pretrained(save_dir)
+            print(f"[{step}] Model saved to {save_dir}")
+            
         torch.cuda.empty_cache()
         gc.collect()
     
+    # 保存最终模型
+    save_dir = "saved_models/ppo_final"
+    ppo_trainer.model.save_pretrained(save_dir)
+    tokenizer.save_pretrained(save_dir)
+    print(f"Final model saved to {save_dir}")
+
     # 关闭文件
     log_file.close()
     response_file.close()

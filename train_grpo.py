@@ -244,10 +244,22 @@ def train():
                 # 终端汇报 Update
                 print(f"Update {update_step} (Step {step}) | Succ: {avg_succ:.2f} | Adv: {avg_adv:.2f} | KL: {avg_kl:.4f} | |g|: {grad_norm.item():.4f}")
                 
+                if update_step > 0 and update_step % 40 == 0:
+                    save_dir = f"saved_models/grpo_update_{update_step}"
+                    model.save_pretrained(save_dir)
+                    tokenizer.save_pretrained(save_dir)
+                    print(f"[{update_step}] Model saved to {save_dir}")
+
                 # 清空篮子，迎接下一个 8 步
                 metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0}
                 update_step += 1
     
+    # 保存最终模型
+    save_dir = "saved_models/grpo_final"
+    model.save_pretrained(save_dir)
+    tokenizer.save_pretrained(save_dir)
+    print(f"Final model saved to {save_dir}")
+
     # 关闭文件
     log_file.close()
     response_file.close()
