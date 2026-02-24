@@ -105,17 +105,44 @@ def train():
             model.eval()
             rollouts = []
             
-            # 1. Rollout Phase
-            for i, item in enumerate(batch):
+            # 【优化】全量 Padding & 并发生成 (Batch Generation)
+            all_q_tensors = []
+            all_num_strs = []
+            max_q_len = 0
+            
+            # 第一遍：收集所有 query，并找出最长长度用于 padding
+            for item in batch:
                 q_tensor = item["query"].to(device)
-                num_str = item["input_nums"]
-                q_tensors = q_tensor.unsqueeze(0).repeat(G, 1)
+                all_q_tensors.append(q_tensor)
+                all_num_strs.append(item["input_nums"])
+                max_q_len = max(max_q_len, q_tensor.shape[0])
                 
-                with torch.no_grad():
-                    outputs = model.generate(q_tensors, **gen_kwargs)
+            # 第二遍：对齐 Padding 并复制 G 份
+            padded_q_list = []
+            for q_tensor in all_q_tensors:
+                pad_len = max_q_len - q_tensor.shape[0]
+                if pad_len > 0:
+                    padded_q = F.pad(q_tensor, (pad_len, 0), value=tokenizer.pad_token_id)
+                else:
+                    padded_q = q_tensor
+                # 复制 G 份
+                padded_q_list.append(padded_q.unsqueeze(0).repeat(G, 1))
                 
-                q_len = q_tensors.shape[1]
-                resp_tensors = outputs[:, q_len:]
+            # 拼成一个巨大的 Tensor: (BatchSize * G, max_q_len)
+            huge_q_tensors = torch.cat(padded_q_list, dim=0)
+            
+            with torch.no_grad():
+                # 一次性让 GPU 火力全开生成所有的回复
+                outputs = model.generate(huge_q_tensors, **gen_kwargs)
+            
+            # 第三遍：拆除大 Batch，分配回各自的 rollout
+            for i, num_str in enumerate(all_num_strs):
+                start_idx = i * G
+                end_idx = start_idx + G
+                
+                group_out = outputs[start_idx:end_idx]
+                q_len = huge_q_tensors.shape[1] # 对齐以巨大的 padding 长度为准
+                resp_tensors = group_out[:, q_len:]
                 responses = tokenizer.batch_decode(resp_tensors, skip_special_tokens=True)
 
                 # 【提速核心】减少硬盘 I/O：降低记录频率，每次只记 1 个样本观察即可
@@ -140,7 +167,7 @@ def train():
                 std_r = group_rewards.std() + 1e-8
                 advantages = (group_rewards - mean_r) / std_r
                 
-                input_ids = outputs
+                input_ids = group_out
                 attention_mask = (input_ids != tokenizer.pad_token_id).long()
                 
                 with torch.no_grad():
@@ -242,10 +269,8 @@ def train():
             metric_acc["kl"] += total_kl
             metric_acc["entropy"] += total_entropy
             
-            # 及时释放显存
+            # 及时释放引用
             rollouts.clear() 
-            torch.cuda.empty_cache()
-            gc.collect()
 
             # 【满 8 步】：求平均值 -> 更新权重 -> 写入 CSV
             if step % accumulation_steps == 0:
