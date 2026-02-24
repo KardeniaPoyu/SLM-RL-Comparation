@@ -41,7 +41,7 @@ def train_sft():
     hf_dataset = Dataset.from_dict({"prompt": prompts, "response": responses})
 
     # 【修复2】：利用 TRL 神器，只对输出部分计算 Loss (增加对不同 TRL 版本的兼容)
-    response_template = "输出：\n"
+    response_template = "后只输出表达式\n<think>\n"
     try:
         from trl import DataCollatorForCompletionOnlyLM
         collator = DataCollatorForCompletionOnlyLM(response_template=response_template, tokenizer=tokenizer)
