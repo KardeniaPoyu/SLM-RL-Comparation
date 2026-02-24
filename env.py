@@ -98,71 +98,71 @@ class Arithmetic24Env:
             return False, "Math error"
 
     def compute_reward(self, input_nums_str, output_text):
-    target_nums = [n.strip() for n in input_nums_str.split(',')]
-    has_think, pred_expr, think_count = self._parse_output(output_text)
-    
-    reward = 0.0
-    is_correct = False
-
-    # 阶段1：严重违规直接大扣并早退
-    if think_count > 1:
-        reward -= 1.0
-        return reward, False
-    
-    if re.search(r'[\u4e00-\u9fa5a-zA-Z]', pred_expr):  # 废话/字母
-        reward -= 0.8
-        return reward, False
-
-    # 阶段2：基础格式奖励（小幅正向）
-    if has_think:
-        reward += 0.2          # 从 0.1 提到 0.2，鼓励用 think
-
-    # 响应长度惩罚（软化，防止过度短输出）
-    text_len = len(output_text.strip())
-    if text_len > 500:
-        reward -= 0.4
-    elif text_len < 50:
-        reward -= 0.2          # 太短也轻罚，防止 collapse 到空
-
-    # 阶段3：表达式初步检查
-    if not pred_expr:
-        reward -= 0.4
-        return reward, False
-
-    equals_count = pred_expr.count('=')
-    if equals_count > 0:
-        reward -= 0.4          # 从 -0.6 降到 -0.4，允许轻微多步残留
-
-    expr_len = len(pred_expr)
-    if expr_len > 120:
-        reward -= 0.3
-    elif expr_len < 10:
-        reward -= 0.3
-
-        # 阶段4：数学验证 + 奖励放大
-    is_correct, reason = self._verify_expression(pred_expr, target_nums)
-    if is_correct:
-        reward += 4.0                  # 核心正向信号
+        target_nums = [n.strip() for n in input_nums_str.split(',')]
+        has_think, pred_expr, think_count = self._parse_output(output_text)
         
-        # 弱化形状奖励：只在正确且有一定复杂性时加一点点
-        operators = sum(1 for c in pred_expr if c in '+-*/')
-        if operators >= 3 or '(' in pred_expr:
-            reward += 0.3              # 幅度控制在 7.5% 左右，不容易被 hack
-    else:
-        # 负反馈保持小而均匀
-        if reason in ["Math error", "Parse error"]:
-            reward -= 0.2
-        elif reason in ["Used wrong numbers", "Invalid characters"]:
-            reward -= 0.3
-        elif reason == "Exponentiation not allowed":
+        reward = 0.0
+        is_correct = False
+    
+        # 阶段1：严重违规直接大扣并早退
+        if think_count > 1:
+            reward -= 1.0
+            return reward, False
+        
+        if re.search(r'[\u4e00-\u9fa5a-zA-Z]', pred_expr):  # 废话/字母
+            reward -= 0.8
+            return reward, False
+    
+        # 阶段2：基础格式奖励（小幅正向）
+        if has_think:
+            reward += 0.2          # 从 0.1 提到 0.2，鼓励用 think
+    
+        # 响应长度惩罚（软化，防止过度短输出）
+        text_len = len(output_text.strip())
+        if text_len > 500:
             reward -= 0.4
+        elif text_len < 50:
+            reward -= 0.2          # 太短也轻罚，防止 collapse 到空
+    
+        # 阶段3：表达式初步检查
+        if not pred_expr:
+            reward -= 0.4
+            return reward, False
+    
+        equals_count = pred_expr.count('=')
+        if equals_count > 0:
+            reward -= 0.4          # 从 -0.6 降到 -0.4，允许轻微多步残留
+    
+        expr_len = len(pred_expr)
+        if expr_len > 120:
+            reward -= 0.3
+        elif expr_len < 10:
+            reward -= 0.3
+    
+        # 阶段4：数学验证 + 奖励放大
+        is_correct, reason = self._verify_expression(pred_expr, target_nums)
+        if is_correct:
+            reward += 4.0                  # 核心正向信号
+            
+            # 弱化形状奖励：只在正确且有一定复杂性时加一点点
+            operators = sum(1 for c in pred_expr if c in '+-*/')
+            if operators >= 3 or '(' in pred_expr:
+                reward += 0.3              # 幅度控制在 7.5% 左右，不容易被 hack
         else:
-            reward -= 0.1
-        
-    # 防止极端负值
-    reward = max(reward, -1.5)
-
-    return reward, is_correct
+            # 负反馈保持小而均匀
+            if reason in ["Math error", "Parse error"]:
+                reward -= 0.2
+            elif reason in ["Used wrong numbers", "Invalid characters"]:
+                reward -= 0.3
+            elif reason == "Exponentiation not allowed":
+                reward -= 0.4
+            else:
+                reward -= 0.1
+            
+        # 防止极端负值
+        reward = max(reward, -1.5)
+    
+        return reward, is_correct
 
 if __name__ == "__main__":
     env = Arithmetic24Env()
