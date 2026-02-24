@@ -99,7 +99,7 @@ def train():
             rollouts = []
             
             # 1. Rollout Phase
-            for item in batch:
+            for i, item in enumerate(batch):
                 q_tensor = item["query"].to(device)
                 num_str = item["input_nums"]
                 q_tensors = q_tensor.unsqueeze(0).repeat(G, 1)
@@ -113,12 +113,12 @@ def train():
 
                 # 【提速核心】减少硬盘 I/O：降低记录频率，每次只记 1 个样本观察即可
                 if step % 10 == 0: 
-                    response_file.write(f"Step {step} - Sample 0:\n")
+                    response_file.write(f"Step {step} - Sample {i}:\n")
                     response_file.write(f"{responses[0]}\n")
                     response_file.write("-" * 80 + "\n")
                     response_file.flush()
 
-                if step == 0: 
+                if step == 0 and i == 0: 
                     print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
                 
                 group_rewards = []
