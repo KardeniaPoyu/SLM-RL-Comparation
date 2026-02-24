@@ -5,7 +5,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 import csv
 from datasets import Dataset
-from trl import SFTTrainer
+from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
 from transformers import TrainingArguments
 from model_utils import load_model_and_tokenizer
 
@@ -13,11 +13,8 @@ def train_sft():
     os.makedirs('saved_models', exist_ok=True)
     
     model, tokenizer = load_model_and_tokenizer(with_value_head=False)
-    
-    # 修复 PEFT 状态标识
     model.is_peft_model = True
 
-    # 读取数据集
     prompts = []
     responses = []
     with open('data/sft_train.csv', 'r', encoding='utf-8') as f:
@@ -26,41 +23,62 @@ def train_sft():
             prompts.append(row['prompt'])
             responses.append(row['response'])
             
-    # SFT 数据集格式化
-    def formatting_func(example):
-        example["text"] = f"{example['prompt']}{example['response']}{tokenizer.eos_token}"
-        return example
+    # 【修复1】：不需要手动分词，交给 SFTTrainer
+    def formatting_prompts_func(example):
+        output_texts = []
+        for i in range(len(example['prompt'])):
+            text = f"{example['prompt'][i]}{example['response'][i]}{tokenizer.eos_token}"
+            output_texts.append(text)
+        return output_texts
 
     hf_dataset = Dataset.from_dict({"prompt": prompts, "response": responses})
-    hf_dataset = hf_dataset.map(formatting_func)
 
-    def tokenize_function(examples):
-        return tokenizer(examples["text"], truncation=True, max_length=512)
+    # 【修复2】：利用 TRL 神器，只对输出部分计算 Loss
+    from trl import DataCollatorForCompletionOnlyLM
+    response_template = "输出：\n"
+    collator = DataCollatorForCompletionOnlyLM(response_template=response_template, tokenizer=tokenizer)
 
-    tokenized_dataset = hf_dataset.map(tokenize_function, batched=True, remove_columns=["prompt", "response", "text"])
-    
+    # 【修复3】：调整小模型的 SFT 超参数
     config = TrainingArguments(
         output_dir="saved_models/sft_training",
         save_strategy="epoch",
-        learning_rate=2e-5,
+        learning_rate=2e-4, 
         per_device_train_batch_size=8,
         gradient_accumulation_steps=4,
-        num_train_epochs=2,
+        num_train_epochs=4, # 小模型+严格格式要求，建议 Epoch 增加到 3-5
         logging_steps=10,
-        optim="adamw_torch"
+        optim="adamw_torch",
+        bf16=True, # 如果显卡支持，强烈建议开 bf16 防溢出，若报错可改为 False
+        max_grad_norm=1.0,
     )
 
-    from transformers import Trainer, DataCollatorForLanguageModeling
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    # 【终极修复4】：动态绕过 TRL 版本冲突导致的 tokenizer 报错
+    import inspect
+    from transformers import Trainer
+    _original_init = Trainer.__init__
+    sig = inspect.signature(_original_init)
+    
+    def _patched_init(self, *args, **kwargs):
+        if "tokenizer" in kwargs:
+            if "processing_class" in sig.parameters:
+                kwargs["processing_class"] = kwargs.pop("tokenizer")
+            elif "tokenizer" not in sig.parameters:
+                kwargs.pop("tokenizer")
+        _original_init(self, *args, **kwargs)
+    Trainer.__init__ = _patched_init
 
-    trainer = Trainer(
+    from trl import SFTTrainer
+    trainer = SFTTrainer(
         model=model,
         args=config,
-        train_dataset=tokenized_dataset,
-        data_collator=data_collator
+        train_dataset=hf_dataset,
+        formatting_func=formatting_prompts_func,
+        data_collator=collator,
+        max_seq_length=512, # SFTTrainer 可以直接接管截断
+        tokenizer=tokenizer, # ⬅️ 交给 monkey patch 自动处理成 processing_class
     )
 
-    print("=== 开始 SFT 训练 ===")
+    print("=== 开始严格的 SFT 训练 ===")
     trainer.train()
     
     save_dir = "saved_models/sft_final"

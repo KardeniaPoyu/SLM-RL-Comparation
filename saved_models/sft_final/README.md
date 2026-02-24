@@ -5,7 +5,9 @@ pipeline_tag: text-generation
 tags:
 - base_model:adapter:Qwen/Qwen2.5-0.5B-Instruct
 - lora
+- sft
 - transformers
+- trl
 ---
 
 # Model Card for Model ID
