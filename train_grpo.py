@@ -189,6 +189,11 @@ def train():
                             with model.disable_adapter():
                                 ref_logits = model(mb_input_ids, attention_mask=mb_attention_mask).logits
                                 mb_ref_log_probs = get_per_token_logps(ref_logits[:, q_len-1:-1, :], mb_resp_tensors).detach()
+                                
+                                # 【极点修复】为了彻底切断 padding 的负面影响，在采集阶段严格将 padding 区域的 log probs 归零
+                                mb_loss_mask = (mb_resp_tensors != tokenizer.pad_token_id).float()
+                                mb_ref_log_probs = mb_ref_log_probs * mb_loss_mask
+                                
                                 ref_log_probs_list.append(mb_ref_log_probs)
                                 del ref_logits
                                 
@@ -232,6 +237,11 @@ def train():
                             
                             logits = model(mb_input_ids, attention_mask=mb_attention_mask).logits
                             mb_log_probs = get_per_token_logps(logits[:, q_len-1:-1, :], mb_resp_tensors)
+                            
+                            # 【极点修复补充】对在线策略算出的 log_probs 也执行相同的 padding 归零
+                            mb_loss_mask = (mb_resp_tensors != tokenizer.pad_token_id).float()
+                            mb_log_probs = mb_log_probs * mb_loss_mask
+                            
                             log_probs_list.append(mb_log_probs)
                             del logits
                         log_probs = torch.cat(log_probs_list, dim=0)
@@ -253,12 +263,15 @@ def train():
                     # 梯度累积
                     loss = loss / accumulation_steps
                     entropy_bonus = 0.005 * entropy.mean()
-                    entropy_bonus = entropy_bonus / accumulation_steps   # ← 加这一行
+                    entropy_bonus = entropy_bonus / accumulation_steps
                     loss = loss - entropy_bonus
                     loss.backward()
                                         
                     total_entropy += entropy.mean().item()
-                    total_kl += (kl * loss_mask).sum(dim=1).mean().item()
+                    
+                    # 【极点修复补充】KL 也必须只在有效的 Token 长度上除求均值
+                    seq_kl = (kl * loss_mask).sum(dim=1) / loss_mask.sum(dim=1)
+                    total_kl += seq_kl.mean().item()
                     
             step += 1
             
