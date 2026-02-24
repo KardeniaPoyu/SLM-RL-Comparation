@@ -5,7 +5,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 import csv
 from datasets import Dataset
-from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
+from trl import SFTTrainer
 from transformers import TrainingArguments
 from model_utils import load_model_and_tokenizer
 
@@ -33,10 +33,37 @@ def train_sft():
 
     hf_dataset = Dataset.from_dict({"prompt": prompts, "response": responses})
 
-    # 【修复2】：利用 TRL 神器，只对输出部分计算 Loss
-    from trl import DataCollatorForCompletionOnlyLM
+    # 【修复2】：利用 TRL 神器，只对输出部分计算 Loss (增加对不同 TRL 版本的兼容)
     response_template = "输出：\n"
-    collator = DataCollatorForCompletionOnlyLM(response_template=response_template, tokenizer=tokenizer)
+    try:
+        from trl import DataCollatorForCompletionOnlyLM
+        collator = DataCollatorForCompletionOnlyLM(response_template=response_template, tokenizer=tokenizer)
+    except ImportError:
+        try:
+            from trl.trainer import DataCollatorForCompletionOnlyLM
+            collator = DataCollatorForCompletionOnlyLM(response_template=response_template, tokenizer=tokenizer)
+        except ImportError:
+            from transformers import DataCollatorForLanguageModeling
+            class CustomCompletionCollator(DataCollatorForLanguageModeling):
+                def __init__(self, response_template, tokenizer, *args, **kwargs):
+                    super().__init__(tokenizer=tokenizer, mlm=False, *args, **kwargs)
+                    self.response_template_ids = tokenizer.encode(response_template, add_special_tokens=False)
+                def torch_call(self, examples):
+                    batch = super().torch_call(examples)
+                    for i in range(len(batch["labels"])):
+                        labels = batch["labels"][i]
+                        idx = -1
+                        tmpl_len = len(self.response_template_ids)
+                        for j in range(len(labels) - tmpl_len + 1):
+                            if labels[j:j+tmpl_len].tolist() == self.response_template_ids:
+                                idx = j + tmpl_len
+                                break
+                        if idx != -1:
+                            batch["labels"][i, :idx] = -100
+                        else:
+                            batch["labels"][i, :] = -100 # 如果找不到模板，则设为忽略
+                    return batch
+            collator = CustomCompletionCollator(response_template=response_template, tokenizer=tokenizer)
 
     # 【修复3】：调整小模型的 SFT 超参数
     config = TrainingArguments(
