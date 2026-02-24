@@ -7,7 +7,7 @@ class Arithmetic24Env:
         self.transformations = standard_transformations + (implicit_multiplication_application,)
         
     def get_prompt(self, nums_str):
-    return f"""{nums_str} 算24
+        return f"""{nums_str} 算24
 <think>简短推理</think>后只输出表达式
 <think>
 """
