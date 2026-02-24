@@ -68,8 +68,8 @@ def train():
     config = PPOConfig(
         learning_rate=1e-5,
         batch_size=128,                 # 【对齐】GRPO G=32 * bs=4
-        mini_batch_size=8,              # PPO 一次拿 8 条送入模型计算 V 值
-        gradient_accumulation_steps=16, # 【对齐】128 / 8 = 16，攒 16 个更新即 128 个样本
+        mini_batch_size=32,              # 原来 8，现在 32
+        gradient_accumulation_steps=4, # 128 / 32 = 4
         target_kl=0.1,
         seed=42,
         # --- ⬇️ 必须补充的对齐参数 ⬇️ ---
@@ -119,7 +119,7 @@ def train():
         "do_sample": True,
         "pad_token_id": tokenizer.pad_token_id,
         "eos_token_id": tokenizer.eos_token_id,
-        "max_new_tokens": 48, # 【对齐】与 GRPO 的 48 保持绝对一致
+        "max_new_tokens": 256, # 放开截断限制，允许模型思考
     }
     
     # PPO 的一个 step 自动处理 batch_size=128 的数据，直接等效于 GRPO 的一个 128样本(bs=4*G=32)的 Update
@@ -131,9 +131,9 @@ def train():
         
         with torch.no_grad():
             response_tensors = []
-            # 同样防 OOM 生成阶段切块
-            for i in range(0, len(query_tensors), 16):
-                batch_q = [q.to(ppo_trainer.accelerator.device) for q in query_tensors[i:i+16]]
+            # 在 24GB 显存上生成阶段切块可放大
+            for i in range(0, len(query_tensors), 64):
+                batch_q = [q.to(ppo_trainer.accelerator.device) for q in query_tensors[i:i+64]]
                 batch_resp = ppo_trainer.generate(batch_q, return_prompt=False, **gen_kwargs)
                 response_tensors.extend(batch_resp)
             

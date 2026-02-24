@@ -60,7 +60,7 @@ def train():
     model.is_peft_model = True
     
     dataset = MathDataset('data/train.csv', tokenizer, env)
-    dataloader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=lambda x: x)
+    dataloader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=lambda x: x, num_workers=8)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
     
@@ -73,7 +73,7 @@ def train():
     ppo_epochs = 1
     
     gen_kwargs = {
-        "max_new_tokens": 48, # 给足空间防止截断
+        "max_new_tokens": 256, # 给足空间防止截断
         "temperature": 1.0,   # 甚至试1.5（配合top_p=0.95）
         "top_p": 0.95,
         "do_sample": True,
@@ -139,7 +139,7 @@ def train():
                 with torch.no_grad():
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
                         # Chunking batch to prevent OOM
-                        mini_batch_size = 16
+                        mini_batch_size = 64
                         old_log_probs_list = []
                         ref_log_probs_list = []
                         for i in range(0, G, mini_batch_size):
@@ -189,7 +189,7 @@ def train():
                     advantages = r["advantages"].unsqueeze(1)
                     
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        mini_batch_size = 16
+                        mini_batch_size = 64
                         log_probs_list = []
                         for i in range(0, input_ids.shape[0], mini_batch_size):
                             mb_input_ids = input_ids[i:i+mini_batch_size]

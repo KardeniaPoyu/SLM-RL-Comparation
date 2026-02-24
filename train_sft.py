@@ -43,13 +43,14 @@ def train_sft():
         output_dir="saved_models/sft_training",
         save_strategy="epoch",
         learning_rate=2e-4, 
-        per_device_train_batch_size=8,
-        gradient_accumulation_steps=4,
+        per_device_train_batch_size=16,
+        gradient_accumulation_steps=2,
         num_train_epochs=4, # 小模型+严格格式要求，建议 Epoch 增加到 3-5
         logging_steps=10,
         optim="adamw_torch",
         bf16=True, # 如果显卡支持，强烈建议开 bf16 防溢出，若报错可改为 False
         max_grad_norm=1.0,
+        dataloader_num_workers=8,
     )
 
     # 【终极修复4】：动态绕过 TRL 版本冲突导致的 tokenizer 报错
@@ -74,7 +75,7 @@ def train_sft():
         train_dataset=hf_dataset,
         formatting_func=formatting_prompts_func,
         data_collator=collator,
-        max_seq_length=512, # SFTTrainer 可以直接接管截断
+        max_seq_length=1024, # SFTTrainer 可以直接接管截断
         tokenizer=tokenizer, # ⬅️ 交给 monkey patch 自动处理成 processing_class
     )
 

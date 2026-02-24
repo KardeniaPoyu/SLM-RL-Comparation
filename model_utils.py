@@ -1,7 +1,7 @@
 import os
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig, get_peft_model
 from trl import AutoModelForCausalLMWithValueHead
 
 def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-0.5B-Instruct", with_value_head=False, lora_resume_path=None):
@@ -9,22 +9,12 @@ def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-0.5B-Instruct", with_value
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16
-    )
-    
-    print(f"Loading base model {model_name} in 4-bit...")
+    print(f"Loading base model {model_name} in bfloat16...")
     base_model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        quantization_config=bnb_config,
+        torch_dtype=torch.bfloat16,
         device_map="auto"
     )
-    
-    print("Preparing model for kbit training...")
-    base_model = prepare_model_for_kbit_training(base_model)
     
     if lora_resume_path and os.path.exists(lora_resume_path):
         from peft import PeftModel
