@@ -67,15 +67,15 @@ def train():
     # ==========================================
     config = PPOConfig(
         learning_rate=1e-5,
-        batch_size=32,                  # 【对齐】每次 Update 收集 32 个样本 (等效 GRPO 的 G=16 * acc=2)
+        batch_size=256,                 # 【对齐】每次 Update 收集 256 个样本 (等效 GRPO 的 G=64 * acc=4)
         mini_batch_size=4,              # 【防 OOM】每次喂给 GPU 4个样本，T4 显存毫无压力
-        gradient_accumulation_steps=8,  # 【对齐】32 / 4 = 8，攒够 8 个 mini_batch 更新一次梯度
+        gradient_accumulation_steps=64, # 【对齐】256 / 4 = 64，攒够 64 个 mini_batch 更新一次梯度
         target_kl=0.1,
         seed=42,
         # --- ⬇️ 必须补充的对齐参数 ⬇️ ---
         ppo_epochs=1,          # 【对齐】GRPO 代码里是 for _ in range(ppo_epochs): 且 ppo_epochs=1。TRL 默认是 4，不改的话 PPO 会多更新 4 倍！
-        init_kl_coef=0.04,     # 【对齐】GRPO 代码里 beta = 0.04。
-        adap_kl_ctrl=False,    # 【对齐】TRL 默认会动态调整 KL 系数，必须关闭，强制使用固定的 0.04。
+        init_kl_coef=0.01,     # 【对齐】GRPO 代码里 beta = 0.01。
+        adap_kl_ctrl=False,    # 【对齐】TRL 默认会动态调整 KL 系数，必须关闭，强制使用固定的 0.01。
         cliprange=0.2          # 【对齐】GRPO 里 clip_eps = 0.2。
     )
     
@@ -114,16 +114,15 @@ def train():
     ppo_trainer.optimizer.step = hooked_optimizer_step
     
     gen_kwargs = {
-        "min_length": -1,
-        "top_k": 0.0,
-        "top_p": 1.0,
+        "temperature": 1.2,
+        "top_p": 0.95,
         "do_sample": True,
         "pad_token_id": tokenizer.pad_token_id,
+        "eos_token_id": tokenizer.eos_token_id,
         "max_new_tokens": 128, # 【对齐】与 GRPO 的 128 保持绝对一致
-        "temperature": 0.8,
     }
     
-    # PPO 的一个 step 自动处理 batch_size=32 的数据，直接等效于 GRPO 的 Update
+    # PPO 的一个 step 自动处理 batch_size=256 的数据，直接等效于 GRPO 的 Update
     step = 0 
     for epoch, batch in enumerate(ppo_trainer.dataloader):
         query_tensors = batch["query"]
@@ -131,11 +130,11 @@ def train():
         input_nums = batch["input_nums"]
         
         with torch.no_grad():
-            response_tensors = ppo_trainer.generate(
-                [q.to(ppo_trainer.accelerator.device) for q in query_tensors], 
-                return_prompt=False, 
-                **gen_kwargs
-            )
+            response_tensors = []
+            for i in range(0, len(query_tensors), 4):
+                batch_q = [q.to(ppo_trainer.accelerator.device) for q in query_tensors[i:i+4]]
+                batch_resp = ppo_trainer.generate(batch_q, return_prompt=False, **gen_kwargs)
+                response_tensors.extend(batch_resp)
             
         responses = tokenizer.batch_decode(response_tensors, skip_special_tokens=True)
         

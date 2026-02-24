@@ -60,21 +60,22 @@ def train():
     model.is_peft_model = True
     
     dataset = MathDataset('data/train.csv', tokenizer, env)
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=True, collate_fn=lambda x: x)
+    dataloader = DataLoader(dataset, batch_size=8, shuffle=True, collate_fn=lambda x: x)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
     
     # 核心对齐参数
-    G = 16
-    accumulation_steps = 2
+    G = 64
+    accumulation_steps = 4
     
-    beta = 0.04
+    beta = 0.01
     clip_eps = 0.2
     ppo_epochs = 1
     
     gen_kwargs = {
         "max_new_tokens": 128, # 给足空间防止截断
-        "temperature": 0.8,
+        "temperature": 1.2,   # 甚至试1.5（配合top_p=0.95）
+        "top_p": 0.95,
         "do_sample": True,
         "pad_token_id": tokenizer.pad_token_id,
         "eos_token_id": tokenizer.eos_token_id,
@@ -189,12 +190,16 @@ def train():
                     loss = ((policy_loss + beta * kl) * loss_mask).sum(dim=1) / loss_mask.sum(dim=1)
                     loss = loss.mean()
                     
-                    # 梯度累积
-                    loss = loss / accumulation_steps
-                    loss.backward()
-                    
                     prob = torch.exp(log_probs)
                     entropy = -(prob * log_probs * loss_mask).sum(dim=1) / loss_mask.sum(dim=1)
+                    
+                    # 梯度累积
+                    loss = loss / accumulation_steps
+                    entropy_bonus = 0.005 * entropy.mean()
+                    entropy_bonus = entropy_bonus / accumulation_steps   # ← 加这一行
+                    loss = loss - entropy_bonus
+                    loss.backward()
+                                        
                     total_entropy += entropy.mean().item()
                     total_kl += (kl * loss_mask).sum(dim=1).mean().item()
                     

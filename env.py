@@ -98,91 +98,71 @@ class Arithmetic24Env:
             return False, "Math error"
 
     def compute_reward(self, input_nums_str, output_text):
-        target_nums = [n.strip() for n in input_nums_str.split(',')]
-        has_think, pred_expr, think_count = self._parse_output(output_text)
+    target_nums = [n.strip() for n in input_nums_str.split(',')]
+    has_think, pred_expr, think_count = self._parse_output(output_text)
+    
+    reward = 0.0
+    is_correct = False
+
+    # 阶段1：严重违规直接大扣并早退
+    if think_count > 1:
+        reward -= 1.0
+        return reward, False
+    
+    if re.search(r'[\u4e00-\u9fa5a-zA-Z]', pred_expr):  # 废话/字母
+        reward -= 0.8
+        return reward, False
+
+    # 阶段2：基础格式奖励（小幅正向）
+    if has_think:
+        reward += 0.2          # 从 0.1 提到 0.2，鼓励用 think
+
+    # 响应长度惩罚（软化，防止过度短输出）
+    text_len = len(output_text.strip())
+    if text_len > 500:
+        reward -= 0.4
+    elif text_len < 50:
+        reward -= 0.2          # 太短也轻罚，防止 collapse 到空
+
+    # 阶段3：表达式初步检查
+    if not pred_expr:
+        reward -= 0.4
+        return reward, False
+
+    equals_count = pred_expr.count('=')
+    if equals_count > 0:
+        reward -= 0.4          # 从 -0.6 降到 -0.4，允许轻微多步残留
+
+    expr_len = len(pred_expr)
+    if expr_len > 120:
+        reward -= 0.3
+    elif expr_len < 10:
+        reward -= 0.3
+
+        # 阶段4：数学验证 + 奖励放大
+    is_correct, reason = self._verify_expression(pred_expr, target_nums)
+    if is_correct:
+        reward += 4.0                  # 核心正向信号
         
-        reward = 0.0
-        
-        # ==========================================
-        # 【阶段1】：格式检查（严格）
-        # ==========================================
-        
-        # 1.1 检查是否有多个</think>标签（严重违规）
-        if think_count > 1:
-            # 模型生成了多个</think>标签，说明没理解独一无二的要求
-            reward -= 1.0
-            return reward, False
-        
-        # 1.2 基础格式奖励
-        if has_think:
-            reward += 0.1
-        
-        # 1.3 检查响应总长度（防止模型废话过多）
-        # 正常格式：<think>推理(~50-100字)</think> + 表达式(~30字) = ~150字左右
-        # 如果超过300字，说明模型生成了过多无关内容
-        if len(output_text.strip()) > 400:
+        # 弱化形状奖励：只在正确且有一定复杂性时加一点点
+        operators = sum(1 for c in pred_expr if c in '+-*/')
+        if operators >= 3 or '(' in pred_expr:
+            reward += 0.3              # 幅度控制在 7.5% 左右，不容易被 hack
+    else:
+        # 负反馈保持小而均匀
+        if reason in ["Math error", "Parse error"]:
+            reward -= 0.2
+        elif reason in ["Used wrong numbers", "Invalid characters"]:
             reward -= 0.3
-        
-        # ==========================================
-        # 【阶段2】：表达式提取和初步检查
-        # ==========================================
-        
-        # 2.1 判空拦截
-        if not pred_expr:
-            reward -= 0.5
-            return reward, False
-        
-        # 2.2 检查表达式中是否包含多个等号（多步骤计算的症状）
-        # 规则规定只能输出单个表达式，如"3 * 6 + 8 - 2"，不能是"3 * 6 = 18; 18 + 8 = 26"
-        equals_count = pred_expr.count('=')
-        if equals_count > 0:
-            # 只要有等号，说明模型输出的是多步计算而不是单个表达式
-            reward -= 0.6
-            return reward, False
-        
-        # 2.3 【核心增强】：全文字拦截器
-        # 检查提取到的表达式中是否包含汉字 (\u4e00-\u9fa5) 或英文字母 (a-zA-Z)
-        if re.search(r'[\u4e00-\u9fa5a-zA-Z]', pred_expr):
-            # 只要包含任何废话，直接扣大分，且不进行后续逻辑校验
-            reward -= 1.0 
-            return reward, False
-        
-        # 2.4 检查表达式长度是否合理
-        # 正常的24点表达式应该在20-80字符之间
-        if len(pred_expr) > 100:
-            # 表达式过长，可能包含了多步计算或其他垃圾内容
+        elif reason == "Exponentiation not allowed":
             reward -= 0.4
-            # 继续检查数学逻辑
-        elif len(pred_expr) < 3:
-            # 表达式过短，肯定不对
-            reward -= 0.3
-            return reward, False
-        
-        # ==========================================
-        # 【阶段3】：逻辑分验证
-        # ==========================================
-        
-        is_correct, reason = self._verify_expression(pred_expr, target_nums)
-        if is_correct:
-            reward += 1.0
         else:
-            # 只要进到这里，说明格式是对的（纯公式），但数学逻辑错了
-            if reason == "Math error":
-                reward -= 0.5
-            elif reason == "Parse error":
-                reward -= 0.4
-            elif reason == "Used wrong numbers":
-                reward -= 0.5
-            elif reason == "Empty expression":
-                reward -= 0.5
-            elif reason == "Invalid characters":
-                reward -= 0.6
-            elif reason == "Exponentiation not allowed":
-                reward -= 0.6
-            else:
-                reward -= 0.3
-                
-        return reward, is_correct
+            reward -= 0.1
+        
+    # 防止极端负值
+    reward = max(reward, -1.5)
+
+    return reward, is_correct
 
 if __name__ == "__main__":
     env = Arithmetic24Env()
