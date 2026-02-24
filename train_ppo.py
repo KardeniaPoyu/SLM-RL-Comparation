@@ -1,5 +1,12 @@
 import os
-os.environ["HF_HOME"] = "E:/hf_cache" 
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+if "HF_HOME" not in os.environ:
+    if os.name == 'nt':
+        os.environ["HF_HOME"] = "E:/hf_cache"
+    else:
+        # Default AutoDL cache path
+        os.environ["HF_HOME"] = "/root/autodl-tmp/.cache/huggingface"
+
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import torch
