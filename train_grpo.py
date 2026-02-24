@@ -73,7 +73,7 @@ def train():
     ppo_epochs = 1
     
     gen_kwargs = {
-        "max_new_tokens": 128, # 给足空间防止截断
+        "max_new_tokens": 256, # 给足空间防止截断
         "temperature": 1.2,   # 甚至试1.5（配合top_p=0.95）
         "top_p": 0.95,
         "do_sample": True,
@@ -138,14 +138,28 @@ def train():
                 
                 with torch.no_grad():
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        logits = model(input_ids, attention_mask=attention_mask).logits
-                        old_log_probs = get_per_token_logps(logits[:, q_len-1:-1, :], resp_tensors).detach()
-                        del logits
-                        
-                        with model.disable_adapter():
-                            ref_logits = model(input_ids, attention_mask=attention_mask).logits
-                            ref_log_probs = get_per_token_logps(ref_logits[:, q_len-1:-1, :], resp_tensors).detach()
-                            del ref_logits
+                        # Chunking batch to prevent OOM
+                        mini_batch_size = 8
+                        old_log_probs_list = []
+                        ref_log_probs_list = []
+                        for i in range(0, G, mini_batch_size):
+                            mb_input_ids = input_ids[i:i+mini_batch_size]
+                            mb_attention_mask = attention_mask[i:i+mini_batch_size]
+                            mb_resp_tensors = resp_tensors[i:i+mini_batch_size]
+                            
+                            logits = model(mb_input_ids, attention_mask=mb_attention_mask).logits
+                            mb_old_log_probs = get_per_token_logps(logits[:, q_len-1:-1, :], mb_resp_tensors).detach()
+                            old_log_probs_list.append(mb_old_log_probs)
+                            del logits
+                            
+                            with model.disable_adapter():
+                                ref_logits = model(mb_input_ids, attention_mask=mb_attention_mask).logits
+                                mb_ref_log_probs = get_per_token_logps(ref_logits[:, q_len-1:-1, :], mb_resp_tensors).detach()
+                                ref_log_probs_list.append(mb_ref_log_probs)
+                                del ref_logits
+                                
+                        old_log_probs = torch.cat(old_log_probs_list, dim=0)
+                        ref_log_probs = torch.cat(ref_log_probs_list, dim=0)
                 
                 rollouts.append({
                     "input_ids": input_ids,
