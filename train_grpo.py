@@ -73,7 +73,7 @@ def train():
     ppo_epochs = 1
     
     gen_kwargs = {
-        "max_new_tokens": 256, # 给足空间防止截断
+        "max_new_tokens": 64, # 给足空间防止截断
         "temperature": 1.2,   # 甚至试1.5（配合top_p=0.95）
         "top_p": 0.95,
         "do_sample": True,
@@ -189,9 +189,18 @@ def train():
                     advantages = r["advantages"].unsqueeze(1)
                     
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        logits = model(input_ids, attention_mask=attention_mask).logits
-                        log_probs = get_per_token_logps(logits[:, q_len-1:-1, :], resp_tensors)
-                        del logits
+                        mini_batch_size = 8
+                        log_probs_list = []
+                        for i in range(0, input_ids.shape[0], mini_batch_size):
+                            mb_input_ids = input_ids[i:i+mini_batch_size]
+                            mb_attention_mask = attention_mask[i:i+mini_batch_size]
+                            mb_resp_tensors = resp_tensors[i:i+mini_batch_size]
+                            
+                            logits = model(mb_input_ids, attention_mask=mb_attention_mask).logits
+                            mb_log_probs = get_per_token_logps(logits[:, q_len-1:-1, :], mb_resp_tensors)
+                            log_probs_list.append(mb_log_probs)
+                            del logits
+                        log_probs = torch.cat(log_probs_list, dim=0)
                     
                     loss_mask = (resp_tensors != tokenizer.pad_token_id).float()
                     ratio = torch.exp(log_probs - r["old_log_probs"])
