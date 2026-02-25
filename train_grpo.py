@@ -1,123 +1,205 @@
-import os
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-if "HF_HOME" not in os.environ:
-    if os.name == 'nt':
-        os.environ["HF_HOME"] = "E:/hf_cache"
-    else:
-        # Default AutoDL cache path
-        os.environ["HF_HOME"] = "/root/autodl-tmp/.cache/huggingface"
+"""
+train_grpo.py — GRPO (Group Relative Policy Optimization) 训练脚本
+支持 G∈{8,16,32,64} 消融实验、逐层梯度追踪、Batch Size 对齐
 
+用法:
+    python train_grpo.py                          # 默认 G=32
+    python train_grpo.py --group-size 8           # G=8 消融
+    python train_grpo.py --group-size 64 --lr 3e-6
+    python train_grpo.py --epochs 2 --save-every 20
+"""
+
+import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
+import argparse
+import json
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 import csv
 import gc
-from model_utils import load_model_and_tokenizer
+from model_utils import load_model_and_tokenizer, collect_per_layer_grad_stats
 from env import Arithmetic24Env
 
+
 class MathDataset(Dataset):
-    def __init__(self, csv_file, tokenizer, env, max_samples=None):
+    def __init__(self, data_file, tokenizer, env, max_samples=None):
         self.queries = []
         self.input_nums = []
-        with open(csv_file, 'r') as f:
-            reader = csv.DictReader(f)
-            for i, row in enumerate(reader):
-                if max_samples and i >= max_samples:
-                    break
-                nums = row['nums']
-                self.input_nums.append(nums)
-                prompt = env.get_prompt(nums)
-                tokens = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
-                self.queries.append(tokens)
-                
+
+        # 支持 CSV 和 JSONL 两种格式
+        if data_file.endswith('.jsonl'):
+            with open(data_file, 'r', encoding='utf-8') as f:
+                for i, line in enumerate(f):
+                    if max_samples and i >= max_samples:
+                        break
+                    record = json.loads(line.strip())
+                    nums = record['nums']
+                    self.input_nums.append(nums)
+                    prompt = env.get_prompt(nums)
+                    tokens = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
+                    self.queries.append(tokens)
+        else:
+            with open(data_file, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for i, row in enumerate(reader):
+                    if max_samples and i >= max_samples:
+                        break
+                    nums = row['nums']
+                    self.input_nums.append(nums)
+                    prompt = env.get_prompt(nums)
+                    tokens = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
+                    self.queries.append(tokens)
+
     def __len__(self):
         return len(self.queries)
-        
+
     def __getitem__(self, idx):
-        return {
-            "query": self.queries[idx],
-            "input_nums": self.input_nums[idx]
-        }
+        return {"query": self.queries[idx], "input_nums": self.input_nums[idx]}
+
 
 def get_per_token_logps(logits, input_ids):
     log_probs = F.log_softmax(logits, dim=-1)
     return torch.gather(log_probs, 2, input_ids.unsqueeze(-1)).squeeze(-1)
 
-def train():
-    os.makedirs('logs', exist_ok=True)
-    
-    # 初始化 CSV 日志
-    log_file = open('logs/grpo_metrics.csv', 'w', newline='')
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="GRPO Training")
+
+    # ── 核心消融参数 ──
+    parser.add_argument("--group-size", "-G", type=int, default=32,
+                        help="组采样大小 G ∈ {8, 16, 32, 64}")
+    parser.add_argument("--batch-size", type=int, default=4,
+                        help="每步题目数。B_eff = batch_size × G × accum_steps")
+    parser.add_argument("--accum-steps", type=int, default=1,
+                        help="梯度累积步数 (默认1, 即每步更新)")
+
+    # ── 优化器 ──
+    parser.add_argument("--lr", type=float, default=5e-6, help="学习率")
+    parser.add_argument("--beta", type=float, default=0.04, help="KL 惩罚系数")
+    parser.add_argument("--clip-eps", type=float, default=0.2, help="PPO clip 范围")
+    parser.add_argument("--max-grad-norm", type=float, default=1.0, help="梯度裁剪")
+    parser.add_argument("--entropy-coef", type=float, default=0.005, help="Entropy bonus 系数")
+
+    # ── 训练控制 ──
+    parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
+    parser.add_argument("--ppo-epochs", type=int, default=1, help="每次 rollout 的 PPO 更新轮数")
+    parser.add_argument("--max-new-tokens", type=int, default=256, help="生成最大长度")
+    parser.add_argument("--save-every", type=int, default=40, help="每 N 个 update 保存一次")
+    parser.add_argument("--max-samples", type=int, default=None, help="限制训练样本数")
+
+    # ── 路径 ──
+    parser.add_argument("--data-file", type=str, default="data/train.csv", help="训练数据路径")
+    parser.add_argument("--sft-path", type=str, default="saved_models/sft_final", help="SFT 预训练权重路径")
+    parser.add_argument("--output-dir", type=str, default="saved_models", help="模型保存目录")
+    parser.add_argument("--log-dir", type=str, default="logs", help="日志目录")
+
+    # ── 日志控制 ──
+    parser.add_argument("--log-layer-grads", action="store_true", help="记录逐 LoRA 层梯度统计")
+
+    # ── 生成参数 ──
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--top-p", type=float, default=0.95)
+
+    # ── 自适应 KL ──
+    parser.add_argument("--adaptive-kl", action="store_true", default=True,
+                        help="启用自适应 KL 惩罚 (默认开启)")
+    parser.add_argument("--kl-high", type=float, default=6.0, help="KL 上界阈值")
+    parser.add_argument("--kl-low", type=float, default=1.0, help="KL 下界阈值")
+
+    return parser.parse_args()
+
+
+def train(args):
+    G = args.group_size
+    bs = args.batch_size
+    accum = args.accum_steps
+    B_eff = bs * G * accum
+
+    print(f"\n{'='*60}")
+    print(f"  GRPO 训练配置")
+    print(f"{'='*60}")
+    print(f"  G (group size)       = {G}")
+    print(f"  batch_size           = {bs}")
+    print(f"  accum_steps          = {accum}")
+    print(f"  B_eff (per update)   = {B_eff}")
+    print(f"  lr                   = {args.lr}")
+    print(f"  beta (KL)            = {args.beta}")
+    print(f"  epochs               = {args.epochs}")
+    print(f"  data                 = {args.data_file}")
+    print(f"  sft_path             = {args.sft_path}")
+    print(f"{'='*60}\n")
+
+    os.makedirs(args.log_dir, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # ── 日志文件 ──
+    log_tag = f"grpo_G{G}"
+    log_file = open(os.path.join(args.log_dir, f'{log_tag}_metrics.csv'), 'w', newline='')
     csv_writer = csv.writer(log_file)
     csv_writer.writerow([
         "step", "success_rate", "policy_entropy",
         "kl_div", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment"
     ])
-    
-    # 初始化 Response 日志
-    response_file = open('logs/grpo_responses.txt', 'w', encoding='utf-8')
-    response_file.write("=== GRPO Training Responses Log ===\n\n")
-    
-    env = Arithmetic24Env()
-    model, tokenizer = load_model_and_tokenizer(with_value_head=False, lora_resume_path="saved_models/sft_final")
 
-    # 【修复 TRL 库缺失属性的 Bug】
+    response_file = open(os.path.join(args.log_dir, f'{log_tag}_responses.txt'), 'w', encoding='utf-8')
+    response_file.write(f"=== GRPO G={G} Training Responses ===\n\n")
+
+    # 逐层梯度日志
+    layer_grad_file = None
+    if args.log_layer_grads:
+        layer_grad_file = open(os.path.join(args.log_dir, f'{log_tag}_layer_grads.jsonl'), 'w')
+
+    # ── 模型加载 ──
+    env = Arithmetic24Env()
+    sft_path = args.sft_path if os.path.exists(args.sft_path) else None
+    model, tokenizer = load_model_and_tokenizer(with_value_head=False, lora_resume_path=sft_path)
     model.is_peft_model = True
-    
-    dataset = MathDataset('data/train.csv', tokenizer, env)
-    dataloader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=lambda x: x, num_workers=8)
-    
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
-    
-    # 核心对齐参数
-    G = 32
-    accumulation_steps = 8
-    
-    beta = 0.01
-    clip_eps = 0.2
-    ppo_epochs = 1
-    
+
+    dataset = MathDataset(args.data_file, tokenizer, env, max_samples=args.max_samples)
+    dataloader = DataLoader(dataset, batch_size=bs, shuffle=True, collate_fn=lambda x: x, num_workers=0)
+
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=args.lr
+    )
+
+    beta = args.beta
     gen_kwargs = {
-        "max_new_tokens": 256, # 给足空间防止截断
-        "temperature": 1.0,   # 甚至试1.5（配合top_p=0.95）
-        "top_p": 0.95,
+        "max_new_tokens": args.max_new_tokens,
+        "temperature": args.temperature,
+        "top_p": args.top_p,
         "do_sample": True,
         "pad_token_id": tokenizer.pad_token_id,
         "eos_token_id": tokenizer.eos_token_id,
     }
-    
+
     step = 0
     update_step = 0
     device = model.device
-    
-    optimizer.zero_grad() # 初始化梯度清零
-    
-    # ====================================================
-    # 【核心修复】：在此处定义指标累加器（小篮子）
-    # 用来收集 8 步的平均数据，以便最真实地画出折线图
-    # ====================================================
+    optimizer.zero_grad()
+
     metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0}
-    
-    for epoch in range(1):
+
+    for epoch in range(args.epochs):
+        print(f"\n── Epoch {epoch+1}/{args.epochs} ──")
+
         for batch in dataloader:
             model.eval()
             rollouts = []
-            
-            # 【优化】全量 Padding & 并发生成 (Batch Generation)
+
+            # ── Batch 生成 ──
             all_q_tensors = []
             all_num_strs = []
             max_q_len = 0
-            
-            # 第一遍：收集所有 query，并找出最长长度用于 padding
+
             for item in batch:
                 q_tensor = item["query"].to(device)
                 all_q_tensors.append(q_tensor)
                 all_num_strs.append(item["input_nums"])
                 max_q_len = max(max_q_len, q_tensor.shape[0])
-                
-            # 第二遍：对齐 Padding 并复制 G 份
+
             padded_q_list = []
             for q_tensor in all_q_tensors:
                 pad_len = max_q_len - q_tensor.shape[0]
@@ -125,81 +207,88 @@ def train():
                     padded_q = F.pad(q_tensor, (pad_len, 0), value=tokenizer.pad_token_id)
                 else:
                     padded_q = q_tensor
-                # 复制 G 份
                 padded_q_list.append(padded_q.unsqueeze(0).repeat(G, 1))
-                
-            # 拼成一个巨大的 Tensor: (BatchSize * G, max_q_len)
+
             huge_q_tensors = torch.cat(padded_q_list, dim=0)
-            
+
+            # 分块生成防 OOM
             with torch.no_grad():
-                # 一次性让 GPU 火力全开生成所有的回复
-                outputs = model.generate(huge_q_tensors, **gen_kwargs)
-            
-            # 第三遍：拆除大 Batch，分配回各自的 rollout
+                gen_chunk = max(G, 16)  # 至少一个 group 一起生成
+                all_outputs = []
+                for ci in range(0, huge_q_tensors.shape[0], gen_chunk):
+                    chunk = huge_q_tensors[ci:ci + gen_chunk]
+                    out = model.generate(chunk, **gen_kwargs)
+                    all_outputs.append(out)
+
+                # Pad 到同一长度后拼接
+                max_out_len = max(o.shape[1] for o in all_outputs)
+                padded_outputs = []
+                for o in all_outputs:
+                    if o.shape[1] < max_out_len:
+                        o = F.pad(o, (0, max_out_len - o.shape[1]), value=tokenizer.pad_token_id)
+                    padded_outputs.append(o)
+                outputs = torch.cat(padded_outputs, dim=0)
+
+            # ── 拆分 rollout ──
+            q_len = huge_q_tensors.shape[1]
+
             for i, num_str in enumerate(all_num_strs):
                 start_idx = i * G
                 end_idx = start_idx + G
-                
+
                 group_out = outputs[start_idx:end_idx]
-                q_len = huge_q_tensors.shape[1] # 对齐以巨大的 padding 长度为准
                 resp_tensors = group_out[:, q_len:]
                 responses = tokenizer.batch_decode(resp_tensors, skip_special_tokens=True)
 
-                # 【提速核心】减少硬盘 I/O：降低记录频率，每次只记 1 个样本观察即可
-                if step % 10 == 0: 
-                    response_file.write(f"Step {step} - Sample {i}:\n")
-                    response_file.write(f"{responses[0]}\n")
-                    response_file.write("-" * 80 + "\n")
+                if step % 10 == 0 and i == 0:
+                    response_file.write(f"Step {step}:\n{responses[0]}\n{'-'*60}\n")
                     response_file.flush()
 
-                if step == 0 and i == 0: 
+                if step == 0 and i == 0:
                     print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
-                
+
                 group_rewards = []
                 corrects = 0
                 for r in responses:
                     reward_val, is_correct = env.compute_reward(num_str, r)
                     group_rewards.append(reward_val)
-                    if is_correct: corrects += 1
-                    
+                    if is_correct:
+                        corrects += 1
+
                 group_rewards = torch.tensor(group_rewards, dtype=torch.float32, device=device)
                 mean_r = group_rewards.mean()
                 std_r = group_rewards.std() + 1e-8
                 advantages = (group_rewards - mean_r) / std_r
-                
+
                 input_ids = group_out
                 attention_mask = (input_ids != tokenizer.pad_token_id).long()
-                
+
                 with torch.no_grad():
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        # Chunking batch to prevent OOM
-                        mini_batch_size = 64
-                        old_log_probs_list = []
-                        ref_log_probs_list = []
-                        for i in range(0, G, mini_batch_size):
-                            mb_input_ids = input_ids[i:i+mini_batch_size]
-                            mb_attention_mask = attention_mask[i:i+mini_batch_size]
-                            mb_resp_tensors = resp_tensors[i:i+mini_batch_size]
-                            
-                            logits = model(mb_input_ids, attention_mask=mb_attention_mask).logits
-                            mb_old_log_probs = get_per_token_logps(logits[:, q_len-1:-1, :], mb_resp_tensors).detach()
-                            old_log_probs_list.append(mb_old_log_probs)
+                        mini_bs = min(64, G)
+                        old_log_probs_list, ref_log_probs_list = [], []
+
+                        for mi in range(0, G, mini_bs):
+                            mb_ids = input_ids[mi:mi + mini_bs]
+                            mb_mask = attention_mask[mi:mi + mini_bs]
+                            mb_resp = resp_tensors[mi:mi + mini_bs]
+                            mb_loss_mask = (mb_resp != tokenizer.pad_token_id).float()
+
+                            logits = model(mb_ids, attention_mask=mb_mask).logits
+                            mb_old_lp = get_per_token_logps(logits[:, q_len-1:-1, :], mb_resp).detach()
+                            old_log_probs_list.append(mb_old_lp)
                             del logits
-                            
+
                             with model.disable_adapter():
-                                ref_logits = model(mb_input_ids, attention_mask=mb_attention_mask).logits
-                                mb_ref_log_probs = get_per_token_logps(ref_logits[:, q_len-1:-1, :], mb_resp_tensors).detach()
-                                
-                                # 【极点修复】为了彻底切断 padding 的负面影响，在采集阶段严格将 padding 区域的 log probs 归零
-                                mb_loss_mask = (mb_resp_tensors != tokenizer.pad_token_id).float()
-                                mb_ref_log_probs = mb_ref_log_probs * mb_loss_mask
-                                
-                                ref_log_probs_list.append(mb_ref_log_probs)
+                                ref_logits = model(mb_ids, attention_mask=mb_mask).logits
+                                mb_ref_lp = get_per_token_logps(ref_logits[:, q_len-1:-1, :], mb_resp).detach()
+                                mb_ref_lp = mb_ref_lp * mb_loss_mask
+                                ref_log_probs_list.append(mb_ref_lp)
                                 del ref_logits
-                                
+
                         old_log_probs = torch.cat(old_log_probs_list, dim=0)
                         ref_log_probs = torch.cat(ref_log_probs_list, dim=0)
-                
+
                 rollouts.append({
                     "input_ids": input_ids,
                     "attention_mask": attention_mask,
@@ -212,82 +301,83 @@ def train():
                     "reward_std": group_rewards.std().item(),
                     "success_rate": corrects / G
                 })
-                
-            # 2. Optimization Phase
+
+            # ── 优化阶段 ──
             model.train()
-            
             total_entropy = 0
             total_kl = 0
-            
-            for _ in range(ppo_epochs):
+
+            for _ in range(args.ppo_epochs):
                 for r in rollouts:
                     input_ids = r["input_ids"]
                     attention_mask = r["attention_mask"]
-                    q_len = r["q_len"]
-                    resp_tensors = r["resp_tensors"]
-                    advantages = r["advantages"].unsqueeze(1)
-                    
+                    q_len_r = r["q_len"]
+                    resp_tensors_r = r["resp_tensors"]
+                    adv = r["advantages"].unsqueeze(1)
+
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        mini_batch_size = 64
-                        log_probs_list = []
-                        for i in range(0, input_ids.shape[0], mini_batch_size):
-                            mb_input_ids = input_ids[i:i+mini_batch_size]
-                            mb_attention_mask = attention_mask[i:i+mini_batch_size]
-                            mb_resp_tensors = resp_tensors[i:i+mini_batch_size]
-                            
-                            logits = model(mb_input_ids, attention_mask=mb_attention_mask).logits
-                            mb_log_probs = get_per_token_logps(logits[:, q_len-1:-1, :], mb_resp_tensors)
-                            
-                            # 【极点修复补充】对在线策略算出的 log_probs 也执行相同的 padding 归零
-                            mb_loss_mask = (mb_resp_tensors != tokenizer.pad_token_id).float()
-                            mb_log_probs = mb_log_probs * mb_loss_mask
-                            
-                            log_probs_list.append(mb_log_probs)
+                        mini_bs = min(64, input_ids.shape[0])
+                        lp_list = []
+                        for mi in range(0, input_ids.shape[0], mini_bs):
+                            mb_ids = input_ids[mi:mi + mini_bs]
+                            mb_mask = attention_mask[mi:mi + mini_bs]
+                            mb_resp = resp_tensors_r[mi:mi + mini_bs]
+                            mb_loss_mask = (mb_resp != tokenizer.pad_token_id).float()
+
+                            logits = model(mb_ids, attention_mask=mb_mask).logits
+                            mb_lp = get_per_token_logps(logits[:, q_len_r-1:-1, :], mb_resp)
+                            mb_lp = mb_lp * mb_loss_mask
+                            lp_list.append(mb_lp)
                             del logits
-                        log_probs = torch.cat(log_probs_list, dim=0)
-                    
-                    loss_mask = (resp_tensors != tokenizer.pad_token_id).float()
+
+                        log_probs = torch.cat(lp_list, dim=0)
+
+                    loss_mask = (resp_tensors_r != tokenizer.pad_token_id).float()
                     ratio = torch.exp(log_probs - r["old_log_probs"])
                     kl = torch.exp(r["ref_log_probs"] - log_probs) - (r["ref_log_probs"] - log_probs) - 1
-                    
-                    surr1 = ratio * advantages
-                    surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * advantages
+
+                    surr1 = ratio * adv
+                    surr2 = torch.clamp(ratio, 1.0 - args.clip_eps, 1.0 + args.clip_eps) * adv
                     policy_loss = -torch.min(surr1, surr2)
-                    
-                    loss = ((policy_loss + beta * kl) * loss_mask).sum(dim=1) / loss_mask.sum(dim=1)
+
+                    loss = ((policy_loss + beta * kl) * loss_mask).sum(dim=1) / loss_mask.sum(dim=1).clamp(min=1)
                     loss = loss.mean()
-                    
+
                     prob = torch.exp(log_probs)
-                    entropy = -(prob * log_probs * loss_mask).sum(dim=1) / loss_mask.sum(dim=1)
-                    
-                    # 梯度累积
-                    loss = loss / accumulation_steps
-                    entropy_bonus = 0.005 * entropy.mean()
-                    entropy_bonus = entropy_bonus / accumulation_steps
+                    entropy = -(prob * log_probs * loss_mask).sum(dim=1) / loss_mask.sum(dim=1).clamp(min=1)
+
+                    loss = loss / accum
+                    entropy_bonus = args.entropy_coef * entropy.mean() / accum
                     loss = loss - entropy_bonus
                     loss.backward()
-                                        
+
                     total_entropy += entropy.mean().item()
-                    
-                    # 【极点修复补充】KL 也必须只在有效的 Token 长度上除求均值
-                    seq_kl = (kl * loss_mask).sum(dim=1) / loss_mask.sum(dim=1)
-                    total_kl += seq_kl.mean().item()
-                    
+
+                    seq_kl = (kl * loss_mask).sum(dim=1) / loss_mask.sum(dim=1).clamp(min=1)
+                    mean_kl_item = seq_kl.mean().item()
+                    total_kl += mean_kl_item
+
+                    # 自适应 KL
+                    if args.adaptive_kl:
+                        if mean_kl_item > args.kl_high:
+                            beta = min(beta * 1.5, 0.2)
+                        elif mean_kl_item < args.kl_low:
+                            beta = max(beta / 1.5, 0.001)
+
             step += 1
-            
-            # 【完美收集数据】：将这一步的数据放进篮子里
-            metric_acc["succ"] += sum([r["success_rate"] for r in rollouts]) / len(rollouts)
-            metric_acc["adv"] += sum([r["reward_mean"] for r in rollouts]) / len(rollouts)
-            metric_acc["adv_std"] += sum([r["reward_std"] for r in rollouts]) / len(rollouts)
+
+            # ── 累积指标 ──
+            metric_acc["succ"] += sum(r["success_rate"] for r in rollouts) / len(rollouts)
+            metric_acc["adv"] += sum(r["reward_mean"] for r in rollouts) / len(rollouts)
+            metric_acc["adv_std"] += sum(r["reward_std"] for r in rollouts) / len(rollouts)
             metric_acc["kl"] += total_kl
             metric_acc["entropy"] += total_entropy
-            
-            # 及时释放引用
-            rollouts.clear() 
 
-            # 【满 8 步】：求平均值 -> 更新权重 -> 写入 CSV
-            if step % accumulation_steps == 0:
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            rollouts.clear()
+
+            # ── 梯度更新 ──
+            if step % accum == 0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 second_moment = 0.0
                 param_count = 0
                 for p in model.parameters():
@@ -296,50 +386,65 @@ def train():
                         param_count += 1
                 if param_count > 0:
                     second_moment /= param_count
-                    
+
+                # 逐层梯度统计
+                if args.log_layer_grads and layer_grad_file:
+                    layer_stats = collect_per_layer_grad_stats(model)
+                    layer_grad_file.write(json.dumps({
+                        "update_step": update_step,
+                        "layers": layer_stats
+                    }, ensure_ascii=False) + '\n')
+                    layer_grad_file.flush()
+
                 optimizer.step()
-                optimizer.zero_grad() 
-                
-                # 计算这 8 步的真实平均值
-                avg_succ = metric_acc["succ"] / accumulation_steps
-                avg_adv = metric_acc["adv"] / accumulation_steps
-                avg_adv_std = metric_acc["adv_std"] / accumulation_steps
-                avg_kl = metric_acc["kl"] / accumulation_steps
-                avg_entropy = metric_acc["entropy"] / accumulation_steps
-                
-                # 完美写入 CSV（用于画图）
+                optimizer.zero_grad()
+
+                avg_succ = metric_acc["succ"] / accum
+                avg_adv = metric_acc["adv"] / accum
+                avg_adv_std = metric_acc["adv_std"] / accum
+                avg_kl = metric_acc["kl"] / accum
+                avg_entropy = metric_acc["entropy"] / accum
+
                 csv_writer.writerow([
                     update_step, avg_succ, avg_entropy, avg_kl,
-                    avg_adv, avg_adv_std, grad_norm.item(), second_moment
+                    avg_adv, avg_adv_std,
+                    grad_norm.item() if hasattr(grad_norm, 'item') else grad_norm,
+                    second_moment
                 ])
                 log_file.flush()
-                
-                # 终端汇报 Update
-                print(f"Update {update_step} (Step {step}) | Succ: {avg_succ:.2f} | Adv: {avg_adv:.2f} | KL: {avg_kl:.4f} | |g|: {grad_norm.item():.4f}")
-                
-                if update_step > 0 and update_step % 40 == 0:
-                    save_dir = f"saved_models/grpo_update_{update_step}"
+
+                print(f"Update {update_step} (Step {step}) | Succ: {avg_succ:.3f} | "
+                      f"R: {avg_adv:.2f} | KL: {avg_kl:.4f} | |g|: {grad_norm:.4f} | β: {beta:.4f}")
+
+                if update_step > 0 and update_step % args.save_every == 0:
+                    save_dir = os.path.join(args.output_dir, f"grpo_G{G}_update_{update_step}")
                     model.save_pretrained(save_dir)
                     tokenizer.save_pretrained(save_dir)
-                    print(f"[{update_step}] Model saved to {save_dir}")
+                    print(f"  💾 Model saved → {save_dir}")
 
-                # 清空篮子，迎接下一个 8 步
                 metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0}
                 update_step += 1
-    
-    # 保存最终模型
-    save_dir = "saved_models/grpo_final"
+
+            torch.cuda.empty_cache()
+            gc.collect()
+
+    # ── 保存最终模型 ──
+    save_dir = os.path.join(args.output_dir, f"grpo_G{G}_final")
     model.save_pretrained(save_dir)
     tokenizer.save_pretrained(save_dir)
-    print(f"Final model saved to {save_dir}")
 
-    # 关闭文件
     log_file.close()
     response_file.close()
-    print(f"\n=== GRPO 训练完成 ===")
-    print(f"指标已保存到: logs/grpo_metrics.csv")
-    print(f"响应已保存到: logs/grpo_responses.txt")
+    if layer_grad_file:
+        layer_grad_file.close()
+
+    print(f"\n=== GRPO G={G} 训练完成 ===")
+    print(f"  模型: {save_dir}")
+    print(f"  指标: {args.log_dir}/{log_tag}_metrics.csv")
+    print(f"  B_eff = {B_eff} 样本/更新")
+
 
 if __name__ == "__main__":
+    args = parse_args()
     print("=== GRPO 训练开始 ===")
-    train()
+    train(args)
