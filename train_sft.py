@@ -124,28 +124,16 @@ def train_sft(args):
         dataloader_num_workers=0,
     )
 
-    # 兼容不同 TRL/Transformers 版本
-    import inspect
     from trl import SFTTrainer
 
-    sft_sig = inspect.signature(SFTTrainer.__init__)
-    sft_kwargs = dict(
+    trainer = SFTTrainer(
         model=model,
         args=config,
         train_dataset=hf_dataset,
         data_collator=collator,
+        tokenizer=tokenizer,
+        max_seq_length=args.max_seq_length,
     )
-
-    # 新版 TRL 把 tokenizer 改名为 processing_class
-    if "processing_class" in sft_sig.parameters:
-        sft_kwargs["processing_class"] = tokenizer
-    elif "tokenizer" in sft_sig.parameters:
-        sft_kwargs["tokenizer"] = tokenizer
-    else:
-        # 都不支持就不传，SFTTrainer 会自动从 model.config 推断
-        pass
-
-    trainer = SFTTrainer(**sft_kwargs)
 
     print(f"\n=== SFT 训练开始 ({args.epochs} epochs, lr={args.lr}) ===")
     trainer.train()
