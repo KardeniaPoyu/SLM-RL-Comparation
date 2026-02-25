@@ -72,43 +72,36 @@ def train_sft(args):
 
     # 只对 response 部分计算 Loss
     response_template = "</think> 后只输出最终公式。\n<think>\n"
-    try:
-        from trl import DataCollatorForCompletionOnlyLM
-        collator = DataCollatorForCompletionOnlyLM(
-            response_template=response_template, tokenizer=tokenizer
-        )
-    except ImportError:
-        try:
-            from trl.trainer import DataCollatorForCompletionOnlyLM
-            collator = DataCollatorForCompletionOnlyLM(
-                response_template=response_template, tokenizer=tokenizer
+    # TRL 0.9.6 的 DataCollatorForCompletionOnlyLM 与 PyTorch 2.8 不兼容 (np.where bug)
+    # 使用自定义 collator，纯 PyTorch 操作，不依赖 numpy
+    from transformers import DataCollatorForLanguageModeling
+
+    class CustomCompletionCollator(DataCollatorForLanguageModeling):
+        def __init__(self, response_template, tokenizer, *args_c, **kwargs_c):
+            super().__init__(tokenizer=tokenizer, mlm=False, *args_c, **kwargs_c)
+            self.response_template_ids = tokenizer.encode(
+                response_template, add_special_tokens=False
             )
-        except ImportError:
-            from transformers import DataCollatorForLanguageModeling
-            class CustomCompletionCollator(DataCollatorForLanguageModeling):
-                def __init__(self, response_template, tokenizer, *args_c, **kwargs_c):
-                    super().__init__(tokenizer=tokenizer, mlm=False, *args_c, **kwargs_c)
-                    self.response_template_ids = tokenizer.encode(
-                        response_template, add_special_tokens=False
-                    )
-                def torch_call(self, examples):
-                    batch = super().torch_call(examples)
-                    for i in range(len(batch["labels"])):
-                        labels = batch["labels"][i]
-                        tmpl_len = len(self.response_template_ids)
-                        idx = -1
-                        for j in range(len(labels) - tmpl_len + 1):
-                            if labels[j:j + tmpl_len].tolist() == self.response_template_ids:
-                                idx = j + tmpl_len
-                                break
-                        if idx != -1:
-                            batch["labels"][i, :idx] = -100
-                        else:
-                            batch["labels"][i, :] = -100
-                    return batch
-            collator = CustomCompletionCollator(
-                response_template=response_template, tokenizer=tokenizer
-            )
+
+        def torch_call(self, examples):
+            batch = super().torch_call(examples)
+            for i in range(len(batch["labels"])):
+                labels = batch["labels"][i]
+                tmpl_len = len(self.response_template_ids)
+                idx = -1
+                for j in range(len(labels) - tmpl_len + 1):
+                    if labels[j:j + tmpl_len].tolist() == self.response_template_ids:
+                        idx = j + tmpl_len
+                        break
+                if idx != -1:
+                    batch["labels"][i, :idx] = -100
+                else:
+                    batch["labels"][i, :] = -100
+            return batch
+
+    collator = CustomCompletionCollator(
+        response_template=response_template, tokenizer=tokenizer
+    )
 
     config = TrainingArguments(
         output_dir=args.output_dir + "_checkpoints",
