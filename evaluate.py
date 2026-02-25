@@ -16,7 +16,16 @@ import json
 import csv
 import glob
 import torch
+import numpy as np
 import gc
+
+# ── PyTorch 2.8 + numpy 兼容补丁 ──
+_orig_tensor_getitem = torch.Tensor.__getitem__
+def _numpy_compat_getitem(self, indices):
+    if isinstance(indices, np.ndarray):
+        indices = torch.from_numpy(indices)
+    return _orig_tensor_getitem(self, indices)
+torch.Tensor.__getitem__ = _numpy_compat_getitem
 from datetime import datetime
 from model_utils import load_model_and_tokenizer
 from env import Arithmetic24Env

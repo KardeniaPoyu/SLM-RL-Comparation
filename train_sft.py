@@ -13,8 +13,17 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import argparse
 import torch
+import numpy as np
 import csv
 import json
+
+# ── PyTorch 2.8 + TRL 0.9.6 兼容补丁 ──
+_orig_tensor_getitem = torch.Tensor.__getitem__
+def _numpy_compat_getitem(self, indices):
+    if isinstance(indices, np.ndarray):
+        indices = torch.from_numpy(indices)
+    return _orig_tensor_getitem(self, indices)
+torch.Tensor.__getitem__ = _numpy_compat_getitem
 from datasets import Dataset
 from transformers import TrainingArguments
 from model_utils import load_model_and_tokenizer
