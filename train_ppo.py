@@ -18,10 +18,7 @@ import torch
 import csv
 import gc
 from torch.utils.data import Dataset
-try:
-    from trl.experimental.ppo import PPOTrainer, PPOConfig
-except ImportError:
-    from trl import PPOTrainer, PPOConfig
+from trl import PPOTrainer, PPOConfig
 from model_utils import load_model_and_tokenizer, collect_per_layer_grad_stats
 from env import Arithmetic24Env
 
@@ -156,43 +153,29 @@ def train(args):
     model, tokenizer = load_model_and_tokenizer(with_value_head=True, lora_resume_path=sft_path)
     model.is_peft_model = True
 
-    import inspect
-
-    # 动态构建 PPOConfig（自动过滤当前 TRL 版本不支持的参数）
-    all_ppo_kwargs = dict(
+    config = PPOConfig(
         learning_rate=args.lr,
         batch_size=args.batch_size,
         mini_batch_size=args.mini_batch_size,
         gradient_accumulation_steps=args.grad_accum_steps,
+        target_kl=args.target_kl,
         seed=42,
         ppo_epochs=args.ppo_epochs,
-        num_ppo_epochs=args.ppo_epochs,  # 新版 TRL 改名
         init_kl_coef=args.init_kl_coef,
         adap_kl_ctrl=args.adaptive_kl,
-        cliprange=args.clip_range,
-        target_kl=args.target_kl,
+        cliprange=args.clip_range
     )
-    ppo_sig = inspect.signature(PPOConfig.__init__)
-    ppo_config_kwargs = {k: v for k, v in all_ppo_kwargs.items() if k in ppo_sig.parameters}
-    print(f"  PPOConfig 实际传入参数: {list(ppo_config_kwargs.keys())}")
-    config = PPOConfig(**ppo_config_kwargs)
 
     dataset = MathDataset(args.data_file, tokenizer, env, max_samples=args.max_samples)
 
-    # 新版 TRL 把 tokenizer 改名为 processing_class，同样动态过滤
-    trainer_sig = inspect.signature(PPOTrainer.__init__)
-    all_trainer_kwargs = dict(
+    ppo_trainer = PPOTrainer(
         config=config,
         model=model,
         ref_model=None,
-        dataset=dataset,
-        data_collator=collator,
-        processing_class=tokenizer,
         tokenizer=tokenizer,
+        dataset=dataset,
+        data_collator=collator
     )
-    trainer_kwargs = {k: v for k, v in all_trainer_kwargs.items() if k in trainer_sig.parameters}
-    print(f"  PPOTrainer 实际传入参数: {list(trainer_kwargs.keys())}")
-    ppo_trainer = PPOTrainer(**trainer_kwargs)
 
     # ── 梯度拦截器 ──
     metric_cache = {"second_moment": 0.0, "total_norm": 0.0, "layer_stats": {}}
