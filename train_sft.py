@@ -17,13 +17,27 @@ import numpy as np
 import csv
 import json
 
-# ── PyTorch 2.8 + TRL 0.9.6 兼容补丁 ──
+# ── PyTorch 2.8 + TRL 0.9.6 全面兼容补丁 ──
 _orig_tensor_getitem = torch.Tensor.__getitem__
 def _numpy_compat_getitem(self, indices):
     if isinstance(indices, np.ndarray):
         indices = torch.from_numpy(indices)
     return _orig_tensor_getitem(self, indices)
 torch.Tensor.__getitem__ = _numpy_compat_getitem
+
+_orig_torch_tensor = torch.tensor
+def _compat_torch_tensor(data, *args, **kwargs):
+    if isinstance(data, (list, tuple)) and len(data) > 0 and isinstance(data[0], torch.Tensor):
+        device = kwargs.pop('device', None)
+        dtype = kwargs.pop('dtype', None)
+        stacked = torch.stack([d.detach().cpu() for d in data])
+        if dtype is not None:
+            stacked = stacked.to(dtype=dtype)
+        if device is not None:
+            stacked = stacked.to(device=device)
+        return stacked
+    return _orig_torch_tensor(data, *args, **kwargs)
+torch.tensor = _compat_torch_tensor
 from datasets import Dataset
 from transformers import TrainingArguments
 from model_utils import load_model_and_tokenizer

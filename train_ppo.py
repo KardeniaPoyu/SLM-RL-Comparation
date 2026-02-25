@@ -19,14 +19,29 @@ import numpy as np
 import csv
 import gc
 
-# ── PyTorch 2.8 + TRL 0.9.6 兼容补丁 ──
-# TRL 内部用 numpy.int64 数组索引 tensor，PyTorch 2.8 不再隐式转换
+# ── PyTorch 2.8 + TRL 0.9.6 全面兼容补丁 ──
+# 问题1: TRL 用 numpy.int64 数组索引 tensor → PyTorch 2.8 不再隐式转换
 _orig_tensor_getitem = torch.Tensor.__getitem__
 def _numpy_compat_getitem(self, indices):
     if isinstance(indices, np.ndarray):
         indices = torch.from_numpy(indices)
     return _orig_tensor_getitem(self, indices)
 torch.Tensor.__getitem__ = _numpy_compat_getitem
+
+# 问题2: TRL 用 torch.tensor(list_of_0d_tensors) → PyTorch 2.8 对 0-d tensor 调 len() 崩溃
+_orig_torch_tensor = torch.tensor
+def _compat_torch_tensor(data, *args, **kwargs):
+    if isinstance(data, (list, tuple)) and len(data) > 0 and isinstance(data[0], torch.Tensor):
+        device = kwargs.pop('device', None)
+        dtype = kwargs.pop('dtype', None)
+        stacked = torch.stack([d.detach().cpu() for d in data])
+        if dtype is not None:
+            stacked = stacked.to(dtype=dtype)
+        if device is not None:
+            stacked = stacked.to(device=device)
+        return stacked
+    return _orig_torch_tensor(data, *args, **kwargs)
+torch.tensor = _compat_torch_tensor
 
 from torch.utils.data import Dataset
 from trl import PPOTrainer, PPOConfig
@@ -250,9 +265,8 @@ def train(args):
             print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
 
         reward_vals, correct_count = compute_rewards_parallel(input_nums, responses)
-        # PyTorch 2.8: 传 Python float 列表，TRL 内部会自行转 tensor
-        # 不能传 0-d tensor 列表，否则 torch.tensor() 调用 len() 崩溃
-        rewards = [float(r) for r in reward_vals]
+        rewards = [torch.tensor(r, dtype=torch.float32, device=ppo_trainer.accelerator.device)
+                   for r in reward_vals]
 
         torch.cuda.empty_cache()  # 释放生成阶段显存，为 training step 腾出空间
         stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
