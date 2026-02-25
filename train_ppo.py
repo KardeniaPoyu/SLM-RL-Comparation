@@ -88,7 +88,7 @@ def parse_args():
     parser.add_argument("--ppo-epochs", type=int, default=1, help="PPO 更新轮数 (对齐 GRPO)")
 
     # ── 训练控制 ──
-    parser.add_argument("--max-new-tokens", type=int, default=256)
+    parser.add_argument("--max-new-tokens", type=int, default=128, help="生成最大长度 (24点答案通常<80 tokens)")
     parser.add_argument("--save-every", type=int, default=40)
     parser.add_argument("--max-samples", type=int, default=None)
 

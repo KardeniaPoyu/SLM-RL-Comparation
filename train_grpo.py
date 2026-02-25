@@ -85,7 +85,7 @@ def parse_args():
     # ── 训练控制 ──
     parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
     parser.add_argument("--ppo-epochs", type=int, default=1, help="每次 rollout 的 PPO 更新轮数")
-    parser.add_argument("--max-new-tokens", type=int, default=256, help="生成最大长度")
+    parser.add_argument("--max-new-tokens", type=int, default=128, help="生成最大长度 (24点答案通常<80 tokens)")
     parser.add_argument("--save-every", type=int, default=40, help="每 N 个 update 保存一次")
     parser.add_argument("--max-samples", type=int, default=None, help="限制训练样本数")
 
@@ -158,9 +158,8 @@ def train(args):
     model.is_peft_model = True
 
     dataset = MathDataset(args.data_file, tokenizer, env, max_samples=args.max_samples)
-    dataloader = DataLoader(dataset, batch_size=bs, shuffle=True, collate_fn=lambda x: x,
-                            num_workers=4, pin_memory=True, prefetch_factor=2,
-                            persistent_workers=True)
+    # num_workers=0: 数据已在 __init__ 全部预加载到内存，workers 只会增加 IPC 开销
+    dataloader = DataLoader(dataset, batch_size=bs, shuffle=True, collate_fn=lambda x: x)
 
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
@@ -189,6 +188,7 @@ def train(args):
 
         for batch in dataloader:
             model.eval()
+            model.gradient_checkpointing_disable()  # 生成阶段无需梯度，关掉加速推理
             rollouts = []
 
             # ── Batch 生成 ──
@@ -306,6 +306,7 @@ def train(args):
 
             # ── 优化阶段 ──
             model.train()
+            model.gradient_checkpointing_enable()  # 训练阶段重新启用
             total_entropy = 0
             total_kl = 0
 

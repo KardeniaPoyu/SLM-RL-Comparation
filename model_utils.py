@@ -4,9 +4,15 @@ model_utils.py — 模型加载工具
 """
 
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"  # 防止 tokenizer 多线程抢占 CPU
+
 import torch
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+# ── RTX 30/40 系列: 启用 TF32 加速矩阵运算 ──
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 
 def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-0.5B-Instruct",
@@ -33,11 +39,22 @@ def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-0.5B-Instruct",
         bnb_4bit_quant_type="nf4",
     )
     
-    base_model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        quantization_config=quantization_config,
-        device_map="auto"
-    )
+    # 尝试使用 Flash Attention 2（RTX 4090/A100 等支持）
+    try:
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            quantization_config=quantization_config,
+            device_map="auto",
+            attn_implementation="flash_attention_2",
+        )
+        print("  ✅ Flash Attention 2 enabled")
+    except Exception:
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            quantization_config=quantization_config,
+            device_map="auto",
+        )
+        print("  ⚠️ Flash Attention 2 not available, using default")
 
     if lora_resume_path and os.path.exists(lora_resume_path):
         from peft import PeftModel
