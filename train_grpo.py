@@ -250,15 +250,11 @@ def train(args):
                 if step == 0 and i == 0:
                     print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
 
-                group_rewards = []
-                corrects = 0
-                for r in responses:
-                    reward_val, is_correct = env.compute_reward(num_str, r)
-                    group_rewards.append(reward_val)
-                    if is_correct:
-                        corrects += 1
+                group_rewards_list, corrects = env.compute_rewards_batch(
+                    [num_str] * G, responses
+                )
 
-                group_rewards = torch.tensor(group_rewards, dtype=torch.float32, device=device)
+                group_rewards = torch.tensor(group_rewards_list, dtype=torch.float32, device=device)
                 mean_r = group_rewards.mean()
                 std_r = group_rewards.std() + 1e-8
                 advantages = (group_rewards - mean_r) / std_r
@@ -431,8 +427,9 @@ def train(args):
                 metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0, "resp_len": 0.0}
                 update_step += 1
 
-            torch.cuda.empty_cache()
-            gc.collect()
+            if step % 10 == 0:
+                torch.cuda.empty_cache()
+                gc.collect()
 
     # ── 保存最终模型 ──
     save_dir = os.path.join(args.output_dir, f"grpo_G{G}_final")

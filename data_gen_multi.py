@@ -238,8 +238,8 @@ def generate_cot_from_expr(expr_str):
 
 def main():
     parser = argparse.ArgumentParser(description="多难度24点数据生成器")
-    parser.add_argument("--n", nargs='+', type=int, default=[3, 4, 5, 6],
-                        help="要生成的 N 值列表（默认: 3 4 5 6）")
+    parser.add_argument("--n", nargs='+', type=int, default=[3, 4, 5],
+                        help="要生成的 N 值列表（默认: 3 4 5，N=6 求解极慢已移除）")
     parser.add_argument("--max-per-n", type=int, default=None,
                         help="每个 N 最多生成多少条（默认: 不限制）")
     parser.add_argument("--sft", action="store_true",

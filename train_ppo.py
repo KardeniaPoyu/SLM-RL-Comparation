@@ -285,8 +285,9 @@ def train(args):
             tokenizer.save_pretrained(save_dir)
             print(f"  💾 Model saved → {save_dir}")
 
-        torch.cuda.empty_cache()
-        gc.collect()
+        if step % 10 == 0:
+            torch.cuda.empty_cache()
+            gc.collect()
 
     # ── 保存最终模型 ──
     save_dir = os.path.join(args.output_dir, "ppo_final")
