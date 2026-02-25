@@ -10,10 +10,6 @@ import torch
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-# ── RTX 30/40 系列: 启用 TF32 加速矩阵运算 ──
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-
 
 def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-0.5B-Instruct",
                               with_value_head=False,
