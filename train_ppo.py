@@ -137,7 +137,7 @@ def train(args):
     csv_writer = csv.writer(log_file)
     csv_writer.writerow([
         "step", "success_rate", "value_loss", "policy_entropy",
-        "kl_div", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment"
+        "kl_div", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment", "mean_response_length"
     ])
 
     response_file = open(os.path.join(args.log_dir, 'ppo_responses.txt'), 'w', encoding='utf-8')
@@ -226,6 +226,8 @@ def train(args):
                 batch_q = [q.to(ppo_trainer.accelerator.device) for q in query_tensors[i:i + gen_chunk]]
                 batch_resp = ppo_trainer.generate(batch_q, return_prompt=False, **gen_kwargs)
                 response_tensors.extend(batch_resp)
+        
+        resp_lens = torch.stack([(r != tokenizer.pad_token_id).float().sum() for r in response_tensors]).mean().item()
 
         responses = tokenizer.batch_decode(response_tensors, skip_special_tokens=True)
 
@@ -260,7 +262,7 @@ def train(args):
 
         csv_writer.writerow([
             step, success_rate, val_loss, policy_entropy, kl,
-            mean_adv, adv_std, total_norm, second_moment
+            mean_adv, adv_std, total_norm, second_moment, resp_lens
         ])
         log_file.flush()
 

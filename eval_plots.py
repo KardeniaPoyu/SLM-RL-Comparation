@@ -60,8 +60,8 @@ def plot_ppo_vs_grpo(log_dir='logs', output_dir='plots'):
         print("No metrics files found in", log_dir)
         return
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle('PPO vs GRPO Comparison (Arithmetic-24)', fontsize=14, fontweight='bold')
+    fig, axes = plt.subplots(3, 2, figsize=(14, 14))
+    fig.suptitle('PPO vs GRPO Comparison (Arithmetic-24)', fontsize=16, fontweight='bold')
 
     create_comparison_plot(
         axes[0, 0], dfs, 'success_rate_smooth',
@@ -80,6 +80,12 @@ def plot_ppo_vs_grpo(log_dir='logs', output_dir='plots'):
         'Gradient Second Moment (Variance Proxy)',
         'Second Moment', use_log=True
     )
+    create_comparison_plot(
+        axes[2, 0], dfs, 'mean_response_length',
+        'Exploration Trajectory (Response Tokens Length)',
+        'Avg Generated Tokens'
+    )
+    axes[2, 1].axis('off') # 隐藏多余的子图
 
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'ppo_vs_grpo.png'), dpi=300)
@@ -108,9 +114,9 @@ def plot_g_ablation(log_dir='logs', output_dir='plots'):
         print("No GRPO ablation files found.")
         return
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(3, 2, figsize=(14, 14))
     fig.suptitle('GRPO Group Size Ablation (G ∈ {8, 16, 32, 64})',
-                 fontsize=14, fontweight='bold')
+                 fontsize=16, fontweight='bold')
 
     create_comparison_plot(
         axes[0, 0], dfs, 'success_rate_smooth',
@@ -129,6 +135,12 @@ def plot_g_ablation(log_dir='logs', output_dir='plots'):
         'Gradient Variance vs Group Size',
         'Second Moment', use_log=True
     )
+    create_comparison_plot(
+        axes[2, 0], dfs, 'mean_response_length',
+        'Exploration Trajectory vs Group Size',
+        'Avg Generated Tokens'
+    )
+    axes[2, 1].axis('off') # 隐藏多余的子图
 
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'grpo_g_ablation.png'), dpi=300)

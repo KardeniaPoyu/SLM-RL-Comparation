@@ -140,7 +140,7 @@ def train(args):
     csv_writer = csv.writer(log_file)
     csv_writer.writerow([
         "step", "success_rate", "policy_entropy",
-        "kl_div", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment"
+        "kl_div", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment", "mean_response_length"
     ])
 
     response_file = open(os.path.join(args.log_dir, f'{log_tag}_responses.txt'), 'w', encoding='utf-8')
@@ -180,7 +180,7 @@ def train(args):
     device = model.device
     optimizer.zero_grad()
 
-    metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0}
+    metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0, "resp_len": 0.0}
 
     for epoch in range(args.epochs):
         print(f"\n── Epoch {epoch+1}/{args.epochs} ──")
@@ -239,6 +239,9 @@ def train(args):
                 group_out = outputs[start_idx:end_idx]
                 resp_tensors = group_out[:, q_len:]
                 responses = tokenizer.batch_decode(resp_tensors, skip_special_tokens=True)
+                
+                # 计算实际生成的 token 长度 (排除 padding)
+                resp_lens = (resp_tensors != tokenizer.pad_token_id).float().sum(dim=1).mean().item()
 
                 if step % 10 == 0 and i == 0:
                     response_file.write(f"Step {step}:\n{responses[0]}\n{'-'*60}\n")
@@ -299,7 +302,8 @@ def train(args):
                     "ref_log_probs": ref_log_probs,
                     "reward_mean": mean_r.item(),
                     "reward_std": group_rewards.std().item(),
-                    "success_rate": corrects / G
+                    "success_rate": corrects / G,
+                    "mean_resp_len": resp_lens
                 })
 
             # ── 优化阶段 ──
@@ -372,6 +376,7 @@ def train(args):
             metric_acc["adv_std"] += sum(r["reward_std"] for r in rollouts) / len(rollouts)
             metric_acc["kl"] += total_kl
             metric_acc["entropy"] += total_entropy
+            metric_acc["resp_len"] += sum(r["mean_resp_len"] for r in rollouts) / len(rollouts)
 
             rollouts.clear()
 
@@ -404,12 +409,13 @@ def train(args):
                 avg_adv_std = metric_acc["adv_std"] / accum
                 avg_kl = metric_acc["kl"] / accum
                 avg_entropy = metric_acc["entropy"] / accum
+                avg_resp_len = metric_acc["resp_len"] / accum
 
                 csv_writer.writerow([
                     update_step, avg_succ, avg_entropy, avg_kl,
                     avg_adv, avg_adv_std,
                     grad_norm.item() if hasattr(grad_norm, 'item') else grad_norm,
-                    second_moment
+                    second_moment, avg_resp_len
                 ])
                 log_file.flush()
 
@@ -422,7 +428,7 @@ def train(args):
                     tokenizer.save_pretrained(save_dir)
                     print(f"  💾 Model saved → {save_dir}")
 
-                metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0}
+                metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0, "resp_len": 0.0}
                 update_step += 1
 
             torch.cuda.empty_cache()
