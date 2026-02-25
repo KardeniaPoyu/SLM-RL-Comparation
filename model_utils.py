@@ -57,7 +57,10 @@ def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-0.5B-Instruct",
     peft_model.gradient_checkpointing_enable()
 
     if with_value_head:
-        from trl import AutoModelForCausalLMWithValueHead
+        try:
+            from trl import AutoModelForCausalLMWithValueHead
+        except ImportError:
+            from trl.experimental.ppo import AutoModelForCausalLMWithValueHead
         print("Wrapping model with Value Head for PPO...")
         model = AutoModelForCausalLMWithValueHead(peft_model)
     else:

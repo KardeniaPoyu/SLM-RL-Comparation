@@ -18,7 +18,10 @@ import torch
 import csv
 import gc
 from torch.utils.data import Dataset
-from trl import PPOTrainer, PPOConfig
+try:
+    from trl import PPOTrainer, PPOConfig
+except ImportError:
+    from trl.experimental.ppo import PPOTrainer, PPOConfig
 from model_utils import load_model_and_tokenizer, collect_per_layer_grad_stats
 from env import Arithmetic24Env
 
@@ -153,29 +156,43 @@ def train(args):
     model, tokenizer = load_model_and_tokenizer(with_value_head=True, lora_resume_path=sft_path)
     model.is_peft_model = True
 
-    config = PPOConfig(
+    import inspect
+
+    # 动态构建 PPOConfig（新版 TRL 删除了 target_kl 等参数）
+    ppo_config_kwargs = dict(
         learning_rate=args.lr,
         batch_size=args.batch_size,
         mini_batch_size=args.mini_batch_size,
         gradient_accumulation_steps=args.grad_accum_steps,
-        target_kl=args.target_kl,
         seed=42,
         ppo_epochs=args.ppo_epochs,
         init_kl_coef=args.init_kl_coef,
         adap_kl_ctrl=args.adaptive_kl,
-        cliprange=args.clip_range
+        cliprange=args.clip_range,
     )
+    # 仅当旧版支持 target_kl 时才传入
+    ppo_sig = inspect.signature(PPOConfig.__init__)
+    if "target_kl" in ppo_sig.parameters:
+        ppo_config_kwargs["target_kl"] = args.target_kl
+    config = PPOConfig(**ppo_config_kwargs)
 
     dataset = MathDataset(args.data_file, tokenizer, env, max_samples=args.max_samples)
 
-    ppo_trainer = PPOTrainer(
+    # 新版 TRL 把 tokenizer 改名为 processing_class
+    trainer_sig = inspect.signature(PPOTrainer.__init__)
+    trainer_kwargs = dict(
         config=config,
         model=model,
         ref_model=None,
-        tokenizer=tokenizer,
         dataset=dataset,
-        data_collator=collator
+        data_collator=collator,
     )
+    if "processing_class" in trainer_sig.parameters:
+        trainer_kwargs["processing_class"] = tokenizer
+    elif "tokenizer" in trainer_sig.parameters:
+        trainer_kwargs["tokenizer"] = tokenizer
+
+    ppo_trainer = PPOTrainer(**trainer_kwargs)
 
     # ── 梯度拦截器 ──
     metric_cache = {"second_moment": 0.0, "total_norm": 0.0, "layer_stats": {}}
