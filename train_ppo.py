@@ -158,22 +158,23 @@ def train(args):
 
     import inspect
 
-    # 动态构建 PPOConfig（新版 TRL 删除了 target_kl 等参数）
-    ppo_config_kwargs = dict(
+    # 动态构建 PPOConfig（自动过滤当前 TRL 版本不支持的参数）
+    all_ppo_kwargs = dict(
         learning_rate=args.lr,
         batch_size=args.batch_size,
         mini_batch_size=args.mini_batch_size,
         gradient_accumulation_steps=args.grad_accum_steps,
         seed=42,
         ppo_epochs=args.ppo_epochs,
+        num_ppo_epochs=args.ppo_epochs,  # 新版 TRL 改名
         init_kl_coef=args.init_kl_coef,
         adap_kl_ctrl=args.adaptive_kl,
         cliprange=args.clip_range,
+        target_kl=args.target_kl,
     )
-    # 仅当旧版支持 target_kl 时才传入
     ppo_sig = inspect.signature(PPOConfig.__init__)
-    if "target_kl" in ppo_sig.parameters:
-        ppo_config_kwargs["target_kl"] = args.target_kl
+    ppo_config_kwargs = {k: v for k, v in all_ppo_kwargs.items() if k in ppo_sig.parameters}
+    print(f"  PPOConfig 实际传入参数: {list(ppo_config_kwargs.keys())}")
     config = PPOConfig(**ppo_config_kwargs)
 
     dataset = MathDataset(args.data_file, tokenizer, env, max_samples=args.max_samples)
