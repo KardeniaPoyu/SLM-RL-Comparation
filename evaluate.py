@@ -150,7 +150,7 @@ def main():
 
     test_data_by_n = {}
     if test_file.endswith('.jsonl'):
-        for n in [4, 5]:
+        for n in [3, 4, 5]:
             samples = load_test_data(test_file, n_filter=n, max_samples=args.n_samples)
             if samples:
                 test_data_by_n[n] = samples
