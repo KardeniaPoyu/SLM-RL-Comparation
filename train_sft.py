@@ -110,7 +110,9 @@ def train_sft(args):
                 response_template=response_template, tokenizer=tokenizer
             )
 
-    config = TrainingArguments(
+    from trl import SFTConfig, SFTTrainer
+
+    config = SFTConfig(
         output_dir=args.output_dir + "_checkpoints",
         save_strategy="epoch",
         learning_rate=args.lr,
@@ -122,18 +124,16 @@ def train_sft(args):
         bf16=True,
         max_grad_norm=1.0,
         dataloader_num_workers=0,
+        dataset_text_field="text",
+        max_length=args.max_seq_length,
     )
-
-    from trl import SFTTrainer
 
     trainer = SFTTrainer(
         model=model,
         args=config,
         train_dataset=hf_dataset,
         data_collator=collator,
-        tokenizer=tokenizer,
-        max_seq_length=args.max_seq_length,
-        dataset_text_field="text",
+        processing_class=tokenizer,
     )
 
     print(f"\n=== SFT 训练开始 ({args.epochs} epochs, lr={args.lr}) ===")
