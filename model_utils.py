@@ -6,7 +6,7 @@ model_utils.py — 模型加载工具
 import os
 import torch
 from peft import LoraConfig, get_peft_model
-from transformers import BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 
 def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-0.5B-Instruct",
