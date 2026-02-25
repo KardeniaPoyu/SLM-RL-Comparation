@@ -54,6 +54,8 @@ def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-0.5B-Instruct",
         print("Applying fresh LoRA...")
         peft_model = get_peft_model(base_model, lora_config)
 
+    if hasattr(peft_model, "enable_input_require_grads"):
+        peft_model.enable_input_require_grads()
     peft_model.gradient_checkpointing_enable()
 
     if with_value_head:
