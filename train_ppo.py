@@ -19,9 +19,9 @@ import csv
 import gc
 from torch.utils.data import Dataset
 try:
-    from trl import PPOTrainer, PPOConfig
-except ImportError:
     from trl.experimental.ppo import PPOTrainer, PPOConfig
+except ImportError:
+    from trl import PPOTrainer, PPOConfig
 from model_utils import load_model_and_tokenizer, collect_per_layer_grad_stats
 from env import Arithmetic24Env
 
@@ -179,20 +179,19 @@ def train(args):
 
     dataset = MathDataset(args.data_file, tokenizer, env, max_samples=args.max_samples)
 
-    # 新版 TRL 把 tokenizer 改名为 processing_class
+    # 新版 TRL 把 tokenizer 改名为 processing_class，同样动态过滤
     trainer_sig = inspect.signature(PPOTrainer.__init__)
-    trainer_kwargs = dict(
+    all_trainer_kwargs = dict(
         config=config,
         model=model,
         ref_model=None,
         dataset=dataset,
         data_collator=collator,
+        processing_class=tokenizer,
+        tokenizer=tokenizer,
     )
-    if "processing_class" in trainer_sig.parameters:
-        trainer_kwargs["processing_class"] = tokenizer
-    elif "tokenizer" in trainer_sig.parameters:
-        trainer_kwargs["tokenizer"] = tokenizer
-
+    trainer_kwargs = {k: v for k, v in all_trainer_kwargs.items() if k in trainer_sig.parameters}
+    print(f"  PPOTrainer 实际传入参数: {list(trainer_kwargs.keys())}")
     ppo_trainer = PPOTrainer(**trainer_kwargs)
 
     # ── 梯度拦截器 ──
