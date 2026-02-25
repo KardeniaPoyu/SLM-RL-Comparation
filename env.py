@@ -146,19 +146,49 @@ class Arithmetic24Env:
 
         return max(reward, -1.5), is_correct
 
-    def compute_rewards_batch(self, nums_list, responses):
-        """
-        批量计算奖励（减少 Python 循环开销）。
-        返回: (rewards_list, corrects_count)
-        """
-        rewards = []
-        corrects = 0
-        for nums, resp in zip(nums_list, responses):
-            r, c = self.compute_reward(nums, resp)
-            rewards.append(r)
-            if c:
-                corrects += 1
-        return rewards, corrects
+# ── 模块级辅助函数（ProcessPoolExecutor 需要顶层可 pickle 的函数）──
+_global_env = None
+
+def _compute_single_reward(args):
+    """Worker function for parallel reward computation."""
+    global _global_env
+    if _global_env is None:
+        _global_env = Arithmetic24Env()
+    nums, resp = args
+    return _global_env.compute_reward(nums, resp)
+
+
+# ── 进程池（懒初始化，复用）──
+_reward_pool = None
+
+def _get_reward_pool():
+    global _reward_pool
+    if _reward_pool is None:
+        import os
+        from concurrent.futures import ProcessPoolExecutor
+        n_workers = min(os.cpu_count() or 4, 8)
+        _reward_pool = ProcessPoolExecutor(max_workers=n_workers)
+    return _reward_pool
+
+
+def compute_rewards_parallel(nums_list, responses):
+    """
+    并行计算奖励（利用多核 CPU 加速字符串解析）。
+    返回: (rewards_list, corrects_count)
+    """
+    try:
+        pool = _get_reward_pool()
+        results = list(pool.map(_compute_single_reward,
+                                zip(nums_list, responses),
+                                chunksize=max(1, len(nums_list) // 8)))
+    except Exception:
+        # fallback 串行
+        env = Arithmetic24Env()
+        results = [env.compute_reward(n, r) for n, r in zip(nums_list, responses)]
+
+    rewards = [r for r, _ in results]
+    corrects = sum(1 for _, c in results if c)
+    return rewards, corrects
 
 
 if __name__ == "__main__":

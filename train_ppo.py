@@ -20,7 +20,7 @@ import gc
 from torch.utils.data import Dataset
 from trl import PPOTrainer, PPOConfig
 from model_utils import load_model_and_tokenizer, collect_per_layer_grad_stats
-from env import Arithmetic24Env
+from env import Arithmetic24Env, compute_rewards_parallel
 
 
 class MathDataset(Dataset):
@@ -226,7 +226,6 @@ def train(args):
                 batch_q = [q.to(ppo_trainer.accelerator.device) for q in query_tensors[i:i + gen_chunk]]
                 batch_resp = ppo_trainer.generate(batch_q, return_prompt=False, **gen_kwargs)
                 response_tensors.extend(batch_resp)
-                torch.cuda.empty_cache()  # 每块生成后释放中间缓存
         
         resp_lens = torch.stack([(r != tokenizer.pad_token_id).float().sum() for r in response_tensors]).mean().item()
 
@@ -239,13 +238,9 @@ def train(args):
         if step == 0:
             print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
 
-        rewards = []
-        correct_count = 0
-        for nums, resp in zip(input_nums, responses):
-            r, is_corr = env.compute_reward(nums, resp)
-            rewards.append(torch.tensor(r, dtype=torch.float32, device=ppo_trainer.accelerator.device))
-            if is_corr:
-                correct_count += 1
+        reward_vals, correct_count = compute_rewards_parallel(input_nums, responses)
+        rewards = [torch.tensor(r, dtype=torch.float32, device=ppo_trainer.accelerator.device)
+                   for r in reward_vals]
 
         torch.cuda.empty_cache()  # 释放生成阶段显存，为 training step 腾出空间
         stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
@@ -287,8 +282,6 @@ def train(args):
             tokenizer.save_pretrained(save_dir)
             print(f"  💾 Model saved → {save_dir}")
 
-        if step % 50 == 0:
-            torch.cuda.empty_cache()
 
     # ── 保存最终模型 ──
     save_dir = os.path.join(args.output_dir, "ppo_final")

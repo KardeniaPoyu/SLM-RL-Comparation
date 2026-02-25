@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader, Dataset
 import csv
 import gc
 from model_utils import load_model_and_tokenizer, collect_per_layer_grad_stats
-from env import Arithmetic24Env
+from env import Arithmetic24Env, compute_rewards_parallel
 
 
 class MathDataset(Dataset):
@@ -252,7 +252,7 @@ def train(args):
                 if step == 0 and i == 0:
                     print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
 
-                group_rewards_list, corrects = env.compute_rewards_batch(
+                group_rewards_list, corrects = compute_rewards_parallel(
                     [num_str] * G, responses
                 )
 
@@ -430,8 +430,6 @@ def train(args):
                 metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0, "resp_len": 0.0}
                 update_step += 1
 
-            if step % 50 == 0:
-                torch.cuda.empty_cache()
 
     # ── 保存最终模型 ──
     save_dir = os.path.join(args.output_dir, f"grpo_G{G}_final")
