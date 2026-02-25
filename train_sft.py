@@ -133,6 +133,7 @@ def train_sft(args):
         data_collator=collator,
         tokenizer=tokenizer,
         max_seq_length=args.max_seq_length,
+        dataset_text_field="text",
     )
 
     print(f"\n=== SFT 训练开始 ({args.epochs} epochs, lr={args.lr}) ===")
