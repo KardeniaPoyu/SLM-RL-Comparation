@@ -64,11 +64,14 @@ def train_sft(args):
     print(f"Loaded {len(prompts)} SFT examples from {args.data}")
 
     def formatting_prompts_func(example):
-        output_texts = []
-        for i in range(len(example['prompt'])):
-            text = f"{example['prompt'][i]}{example['response'][i]}{tokenizer.eos_token}"
-            output_texts.append(text)
-        return output_texts
+        # 兼容新版 TRL (单条) 和旧版 TRL (批量)
+        if isinstance(example['prompt'], list):
+            return [
+                f"{p}{r}{tokenizer.eos_token}"
+                for p, r in zip(example['prompt'], example['response'])
+            ]
+        else:
+            return f"{example['prompt']}{example['response']}{tokenizer.eos_token}"
 
     hf_dataset = Dataset.from_dict({"prompt": prompts, "response": responses})
 
