@@ -128,28 +128,27 @@ def train_sft(args):
 
     # 兼容不同 TRL/Transformers 版本
     import inspect
-    from transformers import Trainer
-    _original_init = Trainer.__init__
-    sig = inspect.signature(_original_init)
-
-    def _patched_init(self, *args_t, **kwargs_t):
-        if "tokenizer" in kwargs_t:
-            if "processing_class" in sig.parameters:
-                kwargs_t["processing_class"] = kwargs_t.pop("tokenizer")
-            elif "tokenizer" not in sig.parameters:
-                kwargs_t.pop("tokenizer")
-        _original_init(self, *args_t, **kwargs_t)
-    Trainer.__init__ = _patched_init
-
     from trl import SFTTrainer
-    trainer = SFTTrainer(
+
+    sft_sig = inspect.signature(SFTTrainer.__init__)
+    sft_kwargs = dict(
         model=model,
         args=config,
         train_dataset=hf_dataset,
         formatting_func=formatting_prompts_func,
         data_collator=collator,
-        tokenizer=tokenizer,
     )
+
+    # 新版 TRL 把 tokenizer 改名为 processing_class
+    if "processing_class" in sft_sig.parameters:
+        sft_kwargs["processing_class"] = tokenizer
+    elif "tokenizer" in sft_sig.parameters:
+        sft_kwargs["tokenizer"] = tokenizer
+    else:
+        # 都不支持就不传，SFTTrainer 会自动从 model.config 推断
+        pass
+
+    trainer = SFTTrainer(**sft_kwargs)
 
     print(f"\n=== SFT 训练开始 ({args.epochs} epochs, lr={args.lr}) ===")
     trainer.train()
