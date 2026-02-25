@@ -250,8 +250,9 @@ def train(args):
             print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
 
         reward_vals, correct_count = compute_rewards_parallel(input_nums, responses)
-        rewards = [torch.tensor(r, dtype=torch.float32, device=ppo_trainer.accelerator.device)
-                   for r in reward_vals]
+        # PyTorch 2.8: 传 Python float 列表，TRL 内部会自行转 tensor
+        # 不能传 0-d tensor 列表，否则 torch.tensor() 调用 len() 崩溃
+        rewards = [float(r) for r in reward_vals]
 
         torch.cuda.empty_cache()  # 释放生成阶段显存，为 training step 腾出空间
         stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
