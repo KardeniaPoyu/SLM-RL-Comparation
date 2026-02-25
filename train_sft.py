@@ -63,17 +63,12 @@ def train_sft(args):
     prompts, responses = load_sft_data(args.data)
     print(f"Loaded {len(prompts)} SFT examples from {args.data}")
 
-    def formatting_prompts_func(example):
-        # 兼容新版 TRL (单条) 和旧版 TRL (批量)
-        if isinstance(example['prompt'], list):
-            return [
-                f"{p}{r}{tokenizer.eos_token}"
-                for p, r in zip(example['prompt'], example['response'])
-            ]
-        else:
-            return f"{example['prompt']}{example['response']}{tokenizer.eos_token}"
-
-    hf_dataset = Dataset.from_dict({"prompt": prompts, "response": responses})
+    # 预格式化为 'text' 列（兼容所有 TRL 版本）
+    texts = [
+        f"{p}{r}{tokenizer.eos_token}"
+        for p, r in zip(prompts, responses)
+    ]
+    hf_dataset = Dataset.from_dict({"text": texts})
 
     # 只对 response 部分计算 Loss
     response_template = "</think> 后只输出最终公式。\n<think>\n"
@@ -138,7 +133,6 @@ def train_sft(args):
         model=model,
         args=config,
         train_dataset=hf_dataset,
-        formatting_func=formatting_prompts_func,
         data_collator=collator,
     )
 
