@@ -70,7 +70,7 @@ def parse_args():
     # ── 核心消融参数 ──
     parser.add_argument("--group-size", "-G", type=int, default=32,
                         help="组采样大小 G ∈ {8, 16, 32, 64}")
-    parser.add_argument("--batch-size", type=int, default=4,
+    parser.add_argument("--batch-size", type=int, default=2,
                         help="每步题目数。B_eff = batch_size × G × accum_steps")
     parser.add_argument("--accum-steps", type=int, default=1,
                         help="梯度累积步数 (默认1, 即每步更新)")
@@ -215,7 +215,7 @@ def train(args):
 
             # 分块生成防 OOM
             with torch.no_grad():
-                gen_chunk = max(G * bs, 64)  # 尽量一次性生成整个 batch
+                gen_chunk = 32  # 3B 模型限制并发生成数，防 OOM
                 all_outputs = []
                 for ci in range(0, huge_q_tensors.shape[0], gen_chunk):
                     chunk = huge_q_tensors[ci:ci + gen_chunk]
@@ -266,7 +266,7 @@ def train(args):
 
                 with torch.no_grad():
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        mini_bs = G  # 云 GPU 全量推理
+                        mini_bs = min(16, G)  # 3B 模型限制 mini-batch 防 OOM
                         old_log_probs_list, ref_log_probs_list = [], []
 
                         for mi in range(0, G, mini_bs):
@@ -319,7 +319,7 @@ def train(args):
                     adv = r["advantages"].unsqueeze(1)
 
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        mini_bs = input_ids.shape[0]  # 云 GPU 全量推理
+                        mini_bs = min(16, input_ids.shape[0])  # 3B 模型限制 mini-batch
                         lp_list = []
                         for mi in range(0, input_ids.shape[0], mini_bs):
                             mb_ids = input_ids[mi:mi + mini_bs]

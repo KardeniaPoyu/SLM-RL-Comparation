@@ -27,8 +27,8 @@ def parse_args():
     parser.add_argument("--output-dir", type=str, default="saved_models/sft_final")
     parser.add_argument("--epochs", type=int, default=4)
     parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--grad-accum", type=int, default=2)
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--grad-accum", type=int, default=8)
     parser.add_argument("--max-seq-length", type=int, default=1024)
     return parser.parse_args()
 

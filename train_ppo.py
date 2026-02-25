@@ -73,9 +73,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="PPO Training")
 
     # ── 对齐参数 ──
-    parser.add_argument("--batch-size", type=int, default=128,
+    parser.add_argument("--batch-size", type=int, default=32,
                         help="PPO batch size (应等于 GRPO 的 bs×G×accum)")
-    parser.add_argument("--mini-batch-size", type=int, default=32, help="PPO mini-batch")
+    parser.add_argument("--mini-batch-size", type=int, default=8, help="PPO mini-batch")
     parser.add_argument("--grad-accum-steps", type=int, default=4,
                         help="梯度累积 (batch/mini_batch)")
 
@@ -221,7 +221,7 @@ def train(args):
 
         with torch.no_grad():
             response_tensors = []
-            gen_chunk = 64
+            gen_chunk = 32  # 3B 模型限制并发生成数
             for i in range(0, len(query_tensors), gen_chunk):
                 batch_q = [q.to(ppo_trainer.accelerator.device) for q in query_tensors[i:i + gen_chunk]]
                 batch_resp = ppo_trainer.generate(batch_q, return_prompt=False, **gen_kwargs)

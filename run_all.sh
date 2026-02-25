@@ -72,7 +72,7 @@ if [ "$SKIP_SFT" = false ] && [ "$ONLY_GRPO" = false ] && [ "$ONLY_PPO" = false 
         --data data/sft_train.csv \
         --epochs 4 \
         --lr 2e-4 \
-        --batch-size 16
+        --batch-size 4
     echo ""
 fi
 
@@ -83,9 +83,9 @@ if [ "$ONLY_GRPO" = false ]; then
     echo "── Step 3: PPO 训练 ──"
     python train_ppo.py \
         --lr 3e-6 \
-        --batch-size 128 \
-        --mini-batch-size 32 \
-        --grad-accum-steps 1 \
+        --batch-size 32 \
+        --mini-batch-size 8 \
+        --grad-accum-steps 4 \
         --init-kl-coef 0.04 \
         --ppo-epochs 1 \
         --save-every 40 \
@@ -99,31 +99,31 @@ fi
 if [ "$ONLY_PPO" = false ]; then
     echo "── Step 4: GRPO G 消融实验 ──"
 
-    # G=8:  bs=32, B_eff = 32*8  = 256  (RTX 4090 24GB 可承受更大 batch)
+    # G=8:  bs=8, B_eff = 8*8   = 64  (3B 模型适配 RTX 4090 24GB)
     echo "  → G=8"
     python train_grpo.py \
-        --group-size 8 --batch-size 32 --accum-steps 1 \
+        --group-size 8 --batch-size 8 --accum-steps 1 \
         --lr 5e-6 --beta 0.04 \
         --save-every 40 --log-layer-grads
 
-    # G=16: bs=16, B_eff = 16*16 = 256
+    # G=16: bs=4, B_eff = 4*16  = 64
     echo "  → G=16"
     python train_grpo.py \
-        --group-size 16 --batch-size 16 --accum-steps 1 \
+        --group-size 16 --batch-size 4 --accum-steps 1 \
         --lr 5e-6 --beta 0.04 \
         --save-every 40 --log-layer-grads
 
-    # G=32: bs=8,  B_eff = 8*32  = 256
+    # G=32: bs=2, B_eff = 2*32  = 64
     echo "  → G=32"
     python train_grpo.py \
-        --group-size 32 --batch-size 8 --accum-steps 1 \
+        --group-size 32 --batch-size 2 --accum-steps 1 \
         --lr 5e-6 --beta 0.04 \
         --save-every 40 --log-layer-grads
 
-    # G=64: bs=4,  B_eff = 4*64  = 256
+    # G=64: bs=1, B_eff = 1*64  = 64
     echo "  → G=64"
     python train_grpo.py \
-        --group-size 64 --batch-size 4 --accum-steps 1 \
+        --group-size 64 --batch-size 1 --accum-steps 1 \
         --lr 5e-6 --beta 0.04 \
         --save-every 40 --log-layer-grads
 

@@ -11,7 +11,7 @@ from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 
-def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-0.5B-Instruct",
+def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-3B-Instruct",
                               with_value_head=False,
                               lora_resume_path=None):
     """
@@ -35,22 +35,21 @@ def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-0.5B-Instruct",
         bnb_4bit_quant_type="nf4",
     )
     
-    # 尝试使用 Flash Attention 2（RTX 4090/A100 等支持）
+    # Flash Attention 2: 仅在已安装 flash_attn 时启用，避免 double-load 破坏 CUDA 状态
+    fa_kwargs = {}
     try:
-        base_model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            quantization_config=quantization_config,
-            device_map="auto",
-            attn_implementation="flash_attention_2",
-        )
-        print("  ✅ Flash Attention 2 enabled")
-    except Exception:
-        base_model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            quantization_config=quantization_config,
-            device_map="auto",
-        )
-        print("  ⚠️ Flash Attention 2 not available, using default")
+        import flash_attn  # noqa: F401
+        fa_kwargs["attn_implementation"] = "flash_attention_2"
+        print("  ✅ Flash Attention 2 will be used")
+    except ImportError:
+        pass
+
+    base_model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        quantization_config=quantization_config,
+        device_map="auto",
+        **fa_kwargs,
+    )
 
     if lora_resume_path and os.path.exists(lora_resume_path):
         from peft import PeftModel
