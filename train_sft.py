@@ -121,7 +121,10 @@ def train_sft(args):
         optim="adamw_torch",
         bf16=True,
         max_grad_norm=1.0,
-        dataloader_num_workers=0,
+        dataloader_num_workers=4,
+        dataloader_pin_memory=True,
+        dataloader_prefetch_factor=2,
+        dataloader_persistent_workers=True,
     )
 
     from trl import SFTTrainer

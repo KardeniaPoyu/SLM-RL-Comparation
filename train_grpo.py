@@ -158,7 +158,9 @@ def train(args):
     model.is_peft_model = True
 
     dataset = MathDataset(args.data_file, tokenizer, env, max_samples=args.max_samples)
-    dataloader = DataLoader(dataset, batch_size=bs, shuffle=True, collate_fn=lambda x: x, num_workers=0)
+    dataloader = DataLoader(dataset, batch_size=bs, shuffle=True, collate_fn=lambda x: x,
+                            num_workers=4, pin_memory=True, prefetch_factor=2,
+                            persistent_workers=True)
 
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
@@ -195,7 +197,7 @@ def train(args):
             max_q_len = 0
 
             for item in batch:
-                q_tensor = item["query"].to(device)
+                q_tensor = item["query"].to(device, non_blocking=True)
                 all_q_tensors.append(q_tensor)
                 all_num_strs.append(item["input_nums"])
                 max_q_len = max(max_q_len, q_tensor.shape[0])
@@ -213,7 +215,7 @@ def train(args):
 
             # 分块生成防 OOM
             with torch.no_grad():
-                gen_chunk = max(G, 16)  # 至少一个 group 一起生成
+                gen_chunk = max(G * bs, 64)  # 尽量一次性生成整个 batch
                 all_outputs = []
                 for ci in range(0, huge_q_tensors.shape[0], gen_chunk):
                     chunk = huge_q_tensors[ci:ci + gen_chunk]
@@ -254,7 +256,7 @@ def train(args):
                     [num_str] * G, responses
                 )
 
-                group_rewards = torch.tensor(group_rewards_list, dtype=torch.float32, device=device)
+                group_rewards = torch.tensor(group_rewards_list, dtype=torch.float32).to(device, non_blocking=True)
                 mean_r = group_rewards.mean()
                 std_r = group_rewards.std() + 1e-8
                 advantages = (group_rewards - mean_r) / std_r
@@ -264,7 +266,7 @@ def train(args):
 
                 with torch.no_grad():
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        mini_bs = min(64, G)
+                        mini_bs = G  # 云 GPU 全量推理
                         old_log_probs_list, ref_log_probs_list = [], []
 
                         for mi in range(0, G, mini_bs):
@@ -316,7 +318,7 @@ def train(args):
                     adv = r["advantages"].unsqueeze(1)
 
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        mini_bs = min(64, input_ids.shape[0])
+                        mini_bs = input_ids.shape[0]  # 云 GPU 全量推理
                         lp_list = []
                         for mi in range(0, input_ids.shape[0], mini_bs):
                             mb_ids = input_ids[mi:mi + mini_bs]
@@ -427,9 +429,8 @@ def train(args):
                 metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0, "resp_len": 0.0}
                 update_step += 1
 
-            if step % 10 == 0:
+            if step % 50 == 0:
                 torch.cuda.empty_cache()
-                gc.collect()
 
     # ── 保存最终模型 ──
     save_dir = os.path.join(args.output_dir, f"grpo_G{G}_final")

@@ -226,6 +226,7 @@ def train(args):
                 batch_q = [q.to(ppo_trainer.accelerator.device) for q in query_tensors[i:i + gen_chunk]]
                 batch_resp = ppo_trainer.generate(batch_q, return_prompt=False, **gen_kwargs)
                 response_tensors.extend(batch_resp)
+                torch.cuda.empty_cache()  # 每块生成后释放中间缓存
         
         resp_lens = torch.stack([(r != tokenizer.pad_token_id).float().sum() for r in response_tensors]).mean().item()
 
@@ -246,6 +247,7 @@ def train(args):
             if is_corr:
                 correct_count += 1
 
+        torch.cuda.empty_cache()  # 释放生成阶段显存，为 training step 腾出空间
         stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
 
         success_rate = correct_count / len(rewards)
@@ -285,9 +287,8 @@ def train(args):
             tokenizer.save_pretrained(save_dir)
             print(f"  💾 Model saved → {save_dir}")
 
-        if step % 10 == 0:
+        if step % 50 == 0:
             torch.cuda.empty_cache()
-            gc.collect()
 
     # ── 保存最终模型 ──
     save_dir = os.path.join(args.output_dir, "ppo_final")
