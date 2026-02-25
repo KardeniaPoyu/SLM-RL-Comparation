@@ -148,7 +148,6 @@ def train_sft(args):
         train_dataset=hf_dataset,
         formatting_func=formatting_prompts_func,
         data_collator=collator,
-        max_seq_length=args.max_seq_length,
         tokenizer=tokenizer,
     )
 
