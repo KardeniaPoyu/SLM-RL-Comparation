@@ -58,12 +58,8 @@ echo ""
 # Step 1: 数据生成
 # ========================================
 if [ "$SKIP_DATA" = false ]; then
-    if [ -f "data/train.csv" ]; then
-        echo "── Step 1: 数据已存在，跳过生成 ──"
-    else
-        echo "── Step 1: 数据生成 (N=3,4,5) ──"
-        python data_gen_multi.py --n 3 4 5 --sft --sft-per-n 200
-    fi
+    echo "── Step 1: 数据生成 (N=3,4,5,6) ──"
+    python data_gen_multi.py --n 3 4 5 6 --sft --sft-per-n 200
     echo ""
 fi
 
