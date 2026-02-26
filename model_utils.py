@@ -13,7 +13,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-3B-Instruct",
                               with_value_head=False,
-                              lora_resume_path=None):
+                              lora_resume_path=None,
+                              gradient_checkpointing=True):
     """
     加载基座模型 + LoRA，可选加载 Value Head。
 
@@ -66,16 +67,27 @@ def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-3B-Instruct",
         print("Applying fresh LoRA...")
         peft_model = get_peft_model(base_model, lora_config)
 
-    if hasattr(peft_model, "enable_input_require_grads"):
-        peft_model.enable_input_require_grads()
-    peft_model.gradient_checkpointing_enable()
-
+    # ── 先包裹 ValueHead，再设置梯度检查点 ──
     if with_value_head:
         from trl import AutoModelForCausalLMWithValueHead
         print("Wrapping model with Value Head for PPO...")
         model = AutoModelForCausalLMWithValueHead(peft_model)
     else:
         model = peft_model
+
+    # 获取实际的 pretrained_model（ValueHead 包裹后需要通过 .pretrained_model 访问）
+    inner_model = model.pretrained_model if with_value_head else model
+
+    if hasattr(inner_model, "enable_input_require_grads"):
+        inner_model.enable_input_require_grads()
+
+    if gradient_checkpointing:
+        inner_model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+        print("  ✅ Gradient checkpointing enabled (use_reentrant=False)")
+    else:
+        print("  ⏭️ Gradient checkpointing disabled (sufficient VRAM)")
 
     return model, tokenizer
 

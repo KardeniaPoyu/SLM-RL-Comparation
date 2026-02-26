@@ -83,8 +83,8 @@ if [ "$ONLY_GRPO" = false ]; then
     echo "── Step 3: PPO 训练 ──"
     python train_ppo.py \
         --lr 3e-6 \
-        --batch-size 32 \
-        --mini-batch-size 8 \
+        --batch-size 128 \
+        --mini-batch-size 32 \
         --grad-accum-steps 4 \
         --init-kl-coef 0.04 \
         --ppo-epochs 1 \
@@ -99,31 +99,31 @@ fi
 if [ "$ONLY_PPO" = false ]; then
     echo "── Step 4: GRPO G 消融实验 ──"
 
-    # G=8:  bs=8, B_eff = 8*8   = 64  (3B 模型适配 RTX 4090 24GB)
+    # G=8:  bs=16, B_eff = 16*8  = 128
     echo "  → G=8"
     python train_grpo.py \
-        --group-size 8 --batch-size 8 --accum-steps 1 \
+        --group-size 8 --batch-size 16 --accum-steps 1 \
         --lr 5e-6 --beta 0.04 \
         --save-every 40 --log-layer-grads
 
-    # G=16: bs=4, B_eff = 4*16  = 64
+    # G=16: bs=8, B_eff = 8*16  = 128
     echo "  → G=16"
     python train_grpo.py \
-        --group-size 16 --batch-size 4 --accum-steps 1 \
+        --group-size 16 --batch-size 8 --accum-steps 1 \
         --lr 5e-6 --beta 0.04 \
         --save-every 40 --log-layer-grads
 
-    # G=32: bs=2, B_eff = 2*32  = 64
+    # G=32: bs=4, B_eff = 4*32  = 128
     echo "  → G=32"
     python train_grpo.py \
-        --group-size 32 --batch-size 2 --accum-steps 1 \
+        --group-size 32 --batch-size 4 --accum-steps 1 \
         --lr 5e-6 --beta 0.04 \
         --save-every 40 --log-layer-grads
 
-    # G=64: bs=1, B_eff = 1*64  = 64
+    # G=64: bs=2, B_eff = 2*64  = 128
     echo "  → G=64"
     python train_grpo.py \
-        --group-size 64 --batch-size 1 --accum-steps 1 \
+        --group-size 64 --batch-size 2 --accum-steps 1 \
         --lr 5e-6 --beta 0.04 \
         --save-every 40 --log-layer-grads
 

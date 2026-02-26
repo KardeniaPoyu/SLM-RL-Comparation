@@ -120,9 +120,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="PPO Training")
 
     # ── 对齐参数 ──
-    parser.add_argument("--batch-size", type=int, default=32,
+    parser.add_argument("--batch-size", type=int, default=128,
                         help="PPO batch size (应等于 GRPO 的 bs×G×accum)")
-    parser.add_argument("--mini-batch-size", type=int, default=8, help="PPO mini-batch")
+    parser.add_argument("--mini-batch-size", type=int, default=32, help="PPO mini-batch")
     parser.add_argument("--grad-accum-steps", type=int, default=4,
                         help="梯度累积 (batch/mini_batch)")
 
@@ -197,7 +197,11 @@ def train(args):
     # ── 模型加载 ──
     env = Arithmetic24Env()
     sft_path = args.sft_path if os.path.exists(args.sft_path) else None
-    model, tokenizer = load_model_and_tokenizer(with_value_head=True, lora_resume_path=sft_path)
+    model, tokenizer = load_model_and_tokenizer(
+        with_value_head=True,
+        lora_resume_path=sft_path,
+        gradient_checkpointing=False  # 4090 24GB 无需梯度检查点，且避免 use_reentrant 兼容问题
+    )
     model.is_peft_model = True
 
     config = PPOConfig(
@@ -277,7 +281,7 @@ def train(args):
 
         with torch.no_grad():
             response_tensors = []
-            gen_chunk = 32  # 3B 模型限制并发生成数
+            gen_chunk = 128  # 4090 24GB 可一次生成整个 batch
             for i in range(0, len(query_tensors), gen_chunk):
                 batch_q = [q.to(ppo_trainer.accelerator.device) for q in query_tensors[i:i + gen_chunk]]
                 batch_resp = ppo_trainer.generate(batch_q, return_prompt=False, **gen_kwargs)

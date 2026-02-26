@@ -70,7 +70,7 @@ def parse_args():
     # ── 核心消融参数 ──
     parser.add_argument("--group-size", "-G", type=int, default=32,
                         help="组采样大小 G ∈ {8, 16, 32, 64}")
-    parser.add_argument("--batch-size", type=int, default=2,
+    parser.add_argument("--batch-size", type=int, default=4,
                         help="每步题目数。B_eff = batch_size × G × accum_steps")
     parser.add_argument("--accum-steps", type=int, default=1,
                         help="梯度累积步数 (默认1, 即每步更新)")
@@ -215,7 +215,7 @@ def train(args):
 
             # 分块生成防 OOM
             with torch.no_grad():
-                gen_chunk = 32  # 3B 模型限制并发生成数，防 OOM
+                gen_chunk = 64  # 4090 24GB 可加大并发生成数
                 all_outputs = []
                 for ci in range(0, huge_q_tensors.shape[0], gen_chunk):
                     chunk = huge_q_tensors[ci:ci + gen_chunk]
@@ -266,7 +266,7 @@ def train(args):
 
                 with torch.no_grad():
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        mini_bs = min(16, G)  # 3B 模型限制 mini-batch 防 OOM
+                        mini_bs = min(32, G)  # 4090 24GB 可加大 mini-batch
                         old_log_probs_list, ref_log_probs_list = [], []
 
                         for mi in range(0, G, mini_bs):
@@ -306,7 +306,9 @@ def train(args):
 
             # ── 优化阶段 ──
             model.train()
-            model.gradient_checkpointing_enable()  # 训练阶段重新启用
+            model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )  # 训练阶段重新启用 (use_reentrant=False 兼容 4-bit)
             total_entropy = 0
             total_kl = 0
 
@@ -319,7 +321,7 @@ def train(args):
                     adv = r["advantages"].unsqueeze(1)
 
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        mini_bs = min(16, input_ids.shape[0])  # 3B 模型限制 mini-batch
+                        mini_bs = min(32, input_ids.shape[0])  # 4090 24GB 可加大 mini-batch
                         lp_list = []
                         for mi in range(0, input_ids.shape[0], mini_bs):
                             mb_ids = input_ids[mi:mi + mini_bs]
