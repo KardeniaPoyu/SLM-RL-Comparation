@@ -23,8 +23,29 @@ import gc
 # 问题1: TRL 用 numpy.int64 数组索引 tensor → PyTorch 2.8 不再隐式转换
 _orig_tensor_getitem = torch.Tensor.__getitem__
 def _numpy_compat_getitem(self, indices):
-    if isinstance(indices, np.ndarray):
-        indices = indices.tolist()
+    if type(indices).__module__ == 'numpy' or type(indices).__name__ == 'ndarray':
+        if hasattr(indices, 'tolist'):
+            return _orig_tensor_getitem(self, indices.tolist())
+        elif hasattr(indices, 'item'):
+            return _orig_tensor_getitem(self, indices.item())
+    
+    if isinstance(indices, tuple):
+        new_indices = []
+        changed = False
+        for idx in indices:
+            if type(idx).__module__ == 'numpy' or type(idx).__name__ == 'ndarray':
+                if hasattr(idx, 'tolist'):
+                    new_indices.append(idx.tolist())
+                elif hasattr(idx, 'item'):
+                    new_indices.append(idx.item())
+                else:
+                    new_indices.append(idx)
+                changed = True
+            else:
+                new_indices.append(idx)
+        if changed:
+            return _orig_tensor_getitem(self, tuple(new_indices))
+            
     return _orig_tensor_getitem(self, indices)
 torch.Tensor.__getitem__ = _numpy_compat_getitem
 
