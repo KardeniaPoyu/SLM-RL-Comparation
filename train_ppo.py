@@ -260,6 +260,15 @@ def train(args):
         "max_new_tokens": args.max_new_tokens,
     }
 
+    # ── 安全转换函数：防止 numpy scalar 的 __str__ 崩溃 ──
+    def _to_float(v):
+        """将 numpy scalar / torch tensor / 任意数值安全转为 Python float"""
+        if isinstance(v, torch.Tensor):
+            return float(v.detach().cpu().item())
+        if hasattr(v, 'item'):  # numpy scalar
+            return float(v.item())
+        return float(v)
+
     step = 0
     for epoch, batch in enumerate(ppo_trainer.dataloader):
         query_tensors = batch["query"]
@@ -274,7 +283,7 @@ def train(args):
                 batch_resp = ppo_trainer.generate(batch_q, return_prompt=False, **gen_kwargs)
                 response_tensors.extend(batch_resp)
         
-        resp_lens = torch.stack([(r != tokenizer.pad_token_id).float().sum() for r in response_tensors]).mean().item()
+        resp_lens = float(torch.stack([(r != tokenizer.pad_token_id).float().sum() for r in response_tensors]).mean().item())
 
         responses = tokenizer.batch_decode(response_tensors, skip_special_tokens=True)
 
@@ -292,17 +301,19 @@ def train(args):
         torch.cuda.empty_cache()  # 释放生成阶段显存，为 training step 腾出空间
         stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
 
-        success_rate = correct_count / len(rewards)
-        val_loss = stats.get("ppo/loss/value", 0.0)
-        policy_entropy = stats.get("ppo/policy/entropy", 0.0)
-        kl = stats.get("ppo/policy/approxkl", 0.0)
-        returns = stats.get("ppo/returns/mean", 0.0)
-        vpred = stats.get("ppo/val/vpred", 0.0)
-        mean_adv = returns - vpred
-        adv_std = stats.get("ppo/val/error", 0.0)
+        # ── 将所有 stats 值强制转为 Python float ──
 
-        total_norm = metric_cache["total_norm"]
-        second_moment = metric_cache["second_moment"]
+        success_rate = _to_float(correct_count / len(rewards))
+        val_loss = _to_float(stats.get("ppo/loss/value", 0.0))
+        policy_entropy = _to_float(stats.get("ppo/policy/entropy", 0.0))
+        kl = _to_float(stats.get("ppo/policy/approxkl", 0.0))
+        returns = _to_float(stats.get("ppo/returns/mean", 0.0))
+        vpred = _to_float(stats.get("ppo/val/vpred", 0.0))
+        mean_adv = _to_float(returns - vpred)
+        adv_std = _to_float(stats.get("ppo/val/error", 0.0))
+
+        total_norm = _to_float(metric_cache["total_norm"])
+        second_moment = _to_float(metric_cache["second_moment"])
 
         csv_writer.writerow([
             step, success_rate, val_loss, policy_entropy, kl,
@@ -318,7 +329,7 @@ def train(args):
             }, ensure_ascii=False) + '\n')
             layer_grad_file.flush()
 
-        mean_reward = torch.stack(rewards).mean().item()
+        mean_reward = float(torch.stack(rewards).mean().item())
         print(f"Update {step} | Succ: {success_rate:.3f} | R: {mean_reward:.2f} | "
               f"KL: {kl:.4f} | VLoss: {val_loss:.4f} | |g|: {total_norm:.4f}")
         step += 1
