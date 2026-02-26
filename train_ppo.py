@@ -24,7 +24,7 @@ import gc
 _orig_tensor_getitem = torch.Tensor.__getitem__
 def _numpy_compat_getitem(self, indices):
     if isinstance(indices, np.ndarray):
-        indices = torch.from_numpy(indices)
+        indices = indices.tolist()
     return _orig_tensor_getitem(self, indices)
 torch.Tensor.__getitem__ = _numpy_compat_getitem
 
