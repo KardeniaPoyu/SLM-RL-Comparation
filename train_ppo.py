@@ -136,7 +136,7 @@ def parse_args():
 
     # ── 训练控制 ──
     parser.add_argument("--max-new-tokens", type=int, default=128, help="生成最大长度 (24点答案通常<80 tokens)")
-    parser.add_argument("--save-every", type=int, default=40)
+    parser.add_argument("--save-every", type=int, default=2)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--max-steps", type=int, default=200, help="最多更新的 step 数量，到达则停止训练并保存模型")
 
@@ -445,6 +445,7 @@ def train(args):
 
         if step > 0 and step % args.save_every == 0:
             save_dir = os.path.join(args.output_dir, f"ppo_step_{step}")
+            os.makedirs(save_dir, exist_ok=True)
             ppo_trainer.model.save_pretrained(save_dir)
             tokenizer.save_pretrained(save_dir)
             print(f"  💾 Model saved → {save_dir}")
@@ -456,6 +457,7 @@ def train(args):
 
     # ── 保存最终模型 ──
     save_dir = os.path.join(args.output_dir, "ppo_final")
+    os.makedirs(save_dir, exist_ok=True)
     ppo_trainer.model.save_pretrained(save_dir)
     tokenizer.save_pretrained(save_dir)
 
