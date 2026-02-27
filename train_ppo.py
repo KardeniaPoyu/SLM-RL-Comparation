@@ -120,10 +120,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description="PPO Training")
 
     # ── 对齐参数 ──
-    parser.add_argument("--batch-size", type=int, default=128,
+    parser.add_argument("--batch-size", type=int, default=64,
                         help="PPO batch size (应等于 GRPO 的 bs×G×accum)")
-    parser.add_argument("--mini-batch-size", type=int, default=32, help="PPO mini-batch")
-    parser.add_argument("--grad-accum-steps", type=int, default=4,
+    parser.add_argument("--mini-batch-size", type=int, default=8, help="PPO mini-batch")
+    parser.add_argument("--grad-accum-steps", type=int, default=8,
                         help="梯度累积 (batch/mini_batch)")
 
     # ── 优化器 ──
@@ -200,7 +200,7 @@ def train(args):
     model, tokenizer = load_model_and_tokenizer(
         with_value_head=True,
         lora_resume_path=sft_path,
-        gradient_checkpointing=False  # 4090 24GB 无需梯度检查点，且避免 use_reentrant 兼容问题
+        gradient_checkpointing=True  # PPO 需要梯度检查点：policy + ref model + value head 同时占用显存
     )
     model.is_peft_model = True
 
@@ -281,7 +281,7 @@ def train(args):
 
         with torch.no_grad():
             response_tensors = []
-            gen_chunk = 128  # 4090 24GB 可一次生成整个 batch
+            gen_chunk = 16  # PPO 分块生成：节省显存给 training step 阶段的双模型前向
             for i in range(0, len(query_tensors), gen_chunk):
                 batch_q = [q.to(ppo_trainer.accelerator.device) for q in query_tensors[i:i + gen_chunk]]
                 batch_resp = ppo_trainer.generate(batch_q, return_prompt=False, **gen_kwargs)
@@ -302,7 +302,8 @@ def train(args):
         rewards = [torch.tensor(r, dtype=torch.float32, device=ppo_trainer.accelerator.device)
                    for r in reward_vals]
 
-        torch.cuda.empty_cache()  # 释放生成阶段显存，为 training step 腾出空间
+        gc.collect()                # 回收 Python 引用，释放 tensor 持有的显存
+        torch.cuda.empty_cache()    # 释放 CUDA 缓存，为 training step 腾出空间
         stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
 
         # ── 将所有 stats 值强制转为 Python float ──
