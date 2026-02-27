@@ -443,6 +443,7 @@ def train(args):
 
                 if update_step > 0 and update_step % args.save_every == 0:
                     save_dir = os.path.join(args.output_dir, f"grpo_G{G}_update_{update_step}")
+                    os.makedirs(save_dir, exist_ok=True)
                     model.save_pretrained(save_dir)
                     tokenizer.save_pretrained(save_dir)
                     print(f"  💾 Model saved → {save_dir}")
@@ -458,6 +459,7 @@ def train(args):
 
     # ── 保存最终模型 ──
     save_dir = os.path.join(args.output_dir, f"grpo_G{G}_final")
+    os.makedirs(save_dir, exist_ok=True)
     model.save_pretrained(save_dir)
     tokenizer.save_pretrained(save_dir)
 
