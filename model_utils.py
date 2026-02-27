@@ -11,7 +11,7 @@ from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 
-def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-3B-Instruct",
+def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-7B-Instruct",
                               with_value_head=False,
                               lora_resume_path=None,
                               gradient_checkpointing=True):
@@ -27,10 +27,13 @@ def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-3B-Instruct",
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print(f"Loading base model {model_name} in 8-bit...")
+    print(f"Loading base model {model_name} in 4-bit (for 7B VRAM safety)...")
     
     quantization_config = BitsAndBytesConfig(
-        load_in_8bit=True,
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
     )
     
     # Flash Attention 2: 仅在已安装 flash_attn 时启用，避免 double-load 破坏 CUDA 状态
