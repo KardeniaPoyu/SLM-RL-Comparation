@@ -29,7 +29,11 @@ class Arithmetic24Env:
         返回: (has_think_open, has_think_close, pred_expr, think_close_count)
         """
         has_think_close = "</think>" in text
-        has_think_open = "<think>" in text
+        
+        # 因为 return_prompt=False，模型输出一般不会再包含原始 prompt 的 <think>
+        # 所以我们只需要验证模型是否老老实实输出了 </think> 即可，或者人为给它加上
+        has_think_open = True
+        
         think_close_count = text.count("</think>")
 
         if has_think_close:
@@ -103,10 +107,10 @@ class Arithmetic24Env:
             return -0.8, False
 
         # ── 阶段2：格式奖励 ──
-        if has_think_open and has_think_close:
+        if has_think_close:
             reward += 0.2
-        elif has_think_close:
-            reward += 0.1
+        else:
+            reward -= 0.5  # 严厉惩罚不写 </think> 的行为
 
         text_len = len(output_text.strip())
         if text_len > 500:

@@ -76,15 +76,15 @@ def parse_args():
                         help="梯度累积步数 (默认1, 即每步更新)")
 
     # ── 优化器 ──
-    parser.add_argument("--lr", type=float, default=5e-6, help="学习率")
+    parser.add_argument("--lr", type=float, default=1e-5, help="学习率 (提高)")
     parser.add_argument("--beta", type=float, default=0.04, help="KL 惩罚系数")
     parser.add_argument("--clip-eps", type=float, default=0.2, help="PPO clip 范围")
-    parser.add_argument("--max-grad-norm", type=float, default=1.0, help="梯度裁剪")
+    parser.add_argument("--max-grad-norm", type=float, default=1.5, help="梯度裁剪，放松约束加速收敛")
     parser.add_argument("--entropy-coef", type=float, default=0.005, help="Entropy bonus 系数")
 
     # ── 训练控制 ──
     parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
-    parser.add_argument("--ppo-epochs", type=int, default=1, help="每次 rollout 的 PPO 更新轮数")
+    parser.add_argument("--ppo-epochs", type=int, default=2, help="每次 rollout 的 PPO 更新轮数 (提高样本利用率)")
     parser.add_argument("--max-new-tokens", type=int, default=128, help="生成最大长度 (24点答案通常<80 tokens)")
     parser.add_argument("--save-every", type=int, default=10, help="每 N 个 update 保存一次")
     parser.add_argument("--max-samples", type=int, default=None, help="限制训练样本数")
@@ -101,8 +101,8 @@ def parse_args():
     parser.add_argument("--log-layer-grads", action="store_true", help="记录逐 LoRA 层梯度统计")
 
     # ── 生成参数 ──
-    parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--top-p", type=float, default=0.90)
 
     # ── 自适应 KL ──
     parser.add_argument("--adaptive-kl", action="store_true", default=True,
