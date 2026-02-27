@@ -90,6 +90,7 @@ if [ "$ONLY_GRPO" = false ]; then
         --init-kl-coef 0.2 \
         --adaptive-kl \
         --ppo-epochs 1 \
+        --max-steps 200 \
         --save-every 40 \
         --log-layer-grads
     echo ""
@@ -106,6 +107,7 @@ if [ "$ONLY_PPO" = false ]; then
     python train_grpo.py \
         --group-size 8 --batch-size 8 --accum-steps 1 \
         --lr 5e-6 --beta 0.04 \
+        --max-steps 200 \
         --save-every 40 --log-layer-grads
 
     # G=16: bs=4, B_eff = 4*16 = 64
@@ -113,6 +115,7 @@ if [ "$ONLY_PPO" = false ]; then
     python train_grpo.py \
         --group-size 16 --batch-size 4 --accum-steps 1 \
         --lr 5e-6 --beta 0.04 \
+        --max-steps 200 \
         --save-every 40 --log-layer-grads
 
     # G=32: bs=2, B_eff = 2*32 = 64
@@ -120,6 +123,7 @@ if [ "$ONLY_PPO" = false ]; then
     python train_grpo.py \
         --group-size 32 --batch-size 2 --accum-steps 1 \
         --lr 5e-6 --beta 0.04 \
+        --max-steps 200 \
         --save-every 40 --log-layer-grads
 
     # G=64: bs=1, B_eff = 1*64 = 64
@@ -127,6 +131,7 @@ if [ "$ONLY_PPO" = false ]; then
     python train_grpo.py \
         --group-size 64 --batch-size 1 --accum-steps 1 \
         --lr 5e-6 --beta 0.04 \
+        --max-steps 200 \
         --save-every 40 --log-layer-grads
 
     echo ""

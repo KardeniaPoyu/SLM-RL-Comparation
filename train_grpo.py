@@ -88,6 +88,7 @@ def parse_args():
     parser.add_argument("--max-new-tokens", type=int, default=128, help="生成最大长度 (24点答案通常<80 tokens)")
     parser.add_argument("--save-every", type=int, default=40, help="每 N 个 update 保存一次")
     parser.add_argument("--max-samples", type=int, default=None, help="限制训练样本数")
+    parser.add_argument("--max-steps", type=int, default=200, help="最多更新的 update step 数量，到达则停止训练并保存模型")
 
     # ── 路径 ──
     parser.add_argument("--data-file", type=str, default="data/train.csv", help="训练数据路径")
@@ -154,7 +155,12 @@ def train(args):
 
     # ── 模型加载 ──
     env = Arithmetic24Env()
-    sft_path = args.sft_path if os.path.exists(args.sft_path) else None
+    sft_path = args.sft_path
+    if sft_path and not os.path.exists(sft_path):
+        print(f"⚠️  WARNING: SFT path '{sft_path}' does NOT exist! Falling back to fresh base model + LoRA.")
+        sft_path = None
+    elif sft_path:
+        print(f"✅ Found SFT checkpoint path: {sft_path}")
     model, tokenizer = load_model_and_tokenizer(with_value_head=False, lora_resume_path=sft_path)
     model.is_peft_model = True
 
@@ -181,10 +187,13 @@ def train(args):
     update_step = 0
     device = model.device
     optimizer.zero_grad()
+    training_done = False  # 用于跳出双层循环
 
     metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0, "resp_len": 0.0}
 
     for epoch in range(args.epochs):
+        if training_done:
+            break
         print(f"\n── Epoch {epoch+1}/{args.epochs} ──")
 
         for batch in dataloader:
@@ -440,6 +449,11 @@ def train(args):
 
                 metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0, "resp_len": 0.0}
                 update_step += 1
+
+                if args.max_steps and update_step >= args.max_steps:
+                    print(f"\n[!] 达到最大训练步数 --max-steps {args.max_steps}，提前终止。")
+                    training_done = True
+                    break
 
 
     # ── 保存最终模型 ──
