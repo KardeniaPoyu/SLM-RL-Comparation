@@ -197,7 +197,13 @@ def train(args):
 
     # ── 模型加载 ──
     env = Arithmetic24Env()
-    sft_path = args.sft_path if os.path.exists(args.sft_path) else None
+    
+    sft_path = args.sft_path
+    if sft_path and not os.path.exists(sft_path):
+        print(f"⚠️  WARNING: SFT path '{sft_path}' does NOT exist! Falling back to fresh base model + LoRA.")
+        sft_path = None
+    elif sft_path:
+        print(f"✅ Found SFT checkpont path: {sft_path}")
 
     # 1. Policy model (trainable): base 8-bit + LoRA + ValueHead
     print("\n[1/2] Loading policy model (with ValueHead)...")
@@ -331,15 +337,19 @@ def train(args):
 
         with torch.no_grad():
             ppo_trainer.model.eval()  # 生成阶段必须使用 eval 模式，避免产生 gradient checkpointing 警告，并停用 dropout
+            inner_m = ppo_trainer.model.pretrained_model if hasattr(ppo_trainer.model, "pretrained_model") else ppo_trainer.model
+            inner_m.gradient_checkpointing_disable()
+            inner_m.config.use_cache = True
+            
             response_tensors = []
             gen_chunk = 4  # PPO 分块生成 (调小至 4 防止 7B OOM)
             for i in range(0, len(query_tensors), gen_chunk):
                 batch_q = [q.to(ppo_trainer.accelerator.device) for q in query_tensors[i:i + gen_chunk]]
-                import warnings
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
-                    batch_resp = ppo_trainer.generate(batch_q, return_prompt=False, **gen_kwargs)
+                batch_resp = ppo_trainer.generate(batch_q, return_prompt=False, **gen_kwargs)
                 response_tensors.extend(batch_resp)
+            
+            inner_m.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+            inner_m.config.use_cache = False
             ppo_trainer.model.train()  # 恢复训练模式
         
         resp_lens = float(torch.stack([(r != tokenizer.pad_token_id).float().sum() for r in response_tensors]).mean().item())
