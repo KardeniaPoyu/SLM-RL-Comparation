@@ -8,4 +8,4 @@ bitsandbytes>=0.41.0
 pandas>=2.0.0
 matplotlib>=3.7.0
 sympy>=1.12
-numpy<2.0.0
+numpy==1.26.4
