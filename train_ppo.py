@@ -65,7 +65,7 @@ def _compat_torch_tensor(data, *args, **kwargs):
 torch.tensor = _compat_torch_tensor
 
 from torch.utils.data import Dataset
-from trl import PPOTrainer, PPOConfig
+from trl import PPOTrainer, PPOConfig, create_reference_model
 from model_utils import load_model_and_tokenizer, collect_per_layer_grad_stats
 from env import Arithmetic24Env, compute_rewards_parallel
 
@@ -203,7 +203,11 @@ def train(args):
         lora_resume_path=sft_path,
         gradient_checkpointing=True  # PPO 需要梯度检查点：policy + ref model + value head 同时占用显存
     )
-    model.is_peft_model = True
+
+    # ── 显式创建独立的 reference model（冻结的 SFT 快照）──
+    print("Creating explicit reference model (frozen deep copy)...")
+    ref_model = create_reference_model(model)
+    print(f"  ✅ ref_model created: {sum(p.requires_grad for p in ref_model.parameters())} trainable params")
 
     config = PPOConfig(
         learning_rate=args.lr,
@@ -224,7 +228,7 @@ def train(args):
     ppo_trainer = PPOTrainer(
         config=config,
         model=model,
-        ref_model=None,
+        ref_model=ref_model,
         tokenizer=tokenizer,
         dataset=dataset,
         data_collator=collator
@@ -316,14 +320,12 @@ def train(args):
             print(f"  id(ref_model) = {id(ppo_trainer.ref_model)}")
             print(f"  model is ref  = {ppo_trainer.model is ppo_trainer.ref_model}")
             print(f"  is_peft_model = {ppo_trainer.is_peft_model}")
-            print(f"  ref_model     = {type(ppo_trainer.ref_model)}")
+            print(f"  ref_model type= {type(ppo_trainer.ref_model)}")
             print(f"  kl_penalty    = {ppo_trainer.config.kl_penalty}")
             print(f"  kl_coef       = {ppo_trainer.kl_ctl.value}")
-            if ppo_trainer.ref_model is not None:
-                n_grad = sum(p.requires_grad for p in ppo_trainer.ref_model.parameters())
-                print(f"  ref grad params = {n_grad}")
-            else:
-                print(f"  ref_model is None (PEFT mode: uses disable_adapter)")
+            n_grad = sum(p.requires_grad for p in ppo_trainer.ref_model.parameters())
+            n_total = sum(1 for _ in ppo_trainer.ref_model.parameters())
+            print(f"  ref params    = {n_total} total, {n_grad} trainable (should be 0)")
             print(f"{'='*60}\n")
 
         stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
@@ -331,10 +333,10 @@ def train(args):
         # ── step-0 诊断：stats keys & KL 值 ──
         if step == 0:
             print(f"\n[DEBUG] stats keys: {sorted(stats.keys())}")
-            print(f"[DEBUG] objective/kl       = {stats.get('objective/kl', 'N/A')}")
-            print(f"[DEBUG] ppo/policy/approxkl = {stats.get('ppo/policy/approxkl', 'N/A')}")
-            print(f"[DEBUG] ppo/policy/policykl = {stats.get('ppo/policy/policykl', 'N/A')}")
-            print(f"[DEBUG] objective/kl_coef   = {stats.get('objective/kl_coef', 'N/A')}")
+            print(f"[DEBUG] objective/kl       = {_to_float(stats.get('objective/kl', 0.0)):.6f}")
+            print(f"[DEBUG] ppo/policy/approxkl = {_to_float(stats.get('ppo/policy/approxkl', 0.0)):.6f}")
+            print(f"[DEBUG] ppo/policy/policykl = {_to_float(stats.get('ppo/policy/policykl', 0.0)):.6f}")
+            print(f"[DEBUG] objective/kl_coef   = {_to_float(stats.get('objective/kl_coef', 0.0)):.6f}")
 
         # ── 将所有 stats 值强制转为 Python float ──
 
