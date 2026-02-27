@@ -200,34 +200,29 @@ def train(args):
     sft_path = args.sft_path if os.path.exists(args.sft_path) else None
 
     # 1. Policy model (trainable): base 8-bit + LoRA + ValueHead
-    print("\n[1/2] Loading policy model...")
+    print("\n[1/2] Loading policy model (with ValueHead)...")
     model, tokenizer = load_model_and_tokenizer(
         with_value_head=True,
         lora_resume_path=sft_path,
         gradient_checkpointing=True
     )
 
-    # 2. Reference model (frozen): 独立加载同样结构，冻结所有参数
-    print("\n[2/2] Loading independent reference model (frozen)...")
-    ref_model, _ = load_model_and_tokenizer(
-        with_value_head=True,
+    # 2. Reference model (frozen): base 8-bit + LoRA, 无 ValueHead
+    print("\n[2/2] Loading reference model (no ValueHead, frozen)...")
+    ref_base, _ = load_model_and_tokenizer(
+        with_value_head=False,
         lora_resume_path=sft_path,
-        gradient_checkpointing=False  # ref 不训练，无需梯度检查点
+        gradient_checkpointing=False  # ref 不训练
     )
-    for p in ref_model.parameters():
+    for p in ref_base.parameters():
         p.requires_grad = False
-    ref_model.eval()
-
-    # 强制禁用 PEFT disable_adapter 机制，让 TRL 使用显式 ref_model
-    # (安全：我们用 LoRA 不是 PREFIX_TUNING，此 flag 仅影响 PREFIX_TUNING 检查)
-    model.is_peft_model = False
-    ref_model.is_peft_model = False
+    ref_base.eval()
 
     n_policy_train = sum(p.requires_grad for p in model.parameters())
-    n_ref_train = sum(p.requires_grad for p in ref_model.parameters())
-    print(f"  Policy model:  {n_policy_train} trainable params")
-    print(f"  Ref model:     {n_ref_train} trainable params (should be 0)")
-    print(f"  model is ref:  {model is ref_model}  (should be False)")
+    n_ref_train = sum(p.requires_grad for p in ref_base.parameters())
+    print(f"  Policy model:  {n_policy_train} trainable params (with ValueHead)")
+    print(f"  Ref model:     {n_ref_train} trainable params (should be 0, no ValueHead)")
+    print(f"  model is ref:  {model is ref_base}  (should be False)")
 
     config = PPOConfig(
         learning_rate=args.lr,
@@ -246,14 +241,45 @@ def train(args):
 
     dataset = MathDataset(args.data_file, tokenizer, env, max_samples=args.max_samples)
 
+    # ── 初始化 PPOTrainer（先不传 ref_model，之后注入）──
+    # TRL 要求 ref_model 是 AutoModelForCausalLMWithValueHead，
+    # 但我们的 ref 是纯 CausalLM。解决方案：先让 TRL 用 PEFT 模式初始化，
+    # 再手动注入 ref_model 并关闭 disable_adapter 机制。
     ppo_trainer = PPOTrainer(
         config=config,
         model=model,
-        ref_model=ref_model,
+        ref_model=None,   # 先不传，初始化后注入
         tokenizer=tokenizer,
         dataset=dataset,
         data_collator=collator
     )
+
+    # ── 注入无 ValueHead 的 ref_model ──
+    # 薄包装器：让 CausalLM 输出兼容 TRL 的 (logits, _, values) 解包
+    class _CausalLMRefWrapper(torch.nn.Module):
+        def __init__(self, causal_lm):
+            super().__init__()
+            self.pretrained_model = causal_lm
+
+        def forward(self, **kwargs):
+            out = self.pretrained_model(**kwargs)
+            # TRL batched_forward_pass 解包: logits, _, values = model(...)
+            # ref 的 values 从不使用，返回 dummy zeros
+            dummy_values = torch.zeros(
+                out.logits.shape[0], out.logits.shape[1],
+                device=out.logits.device, dtype=out.logits.dtype
+            )
+            return (out.logits, out.loss, dummy_values)
+
+        def eval(self):
+            self.pretrained_model.eval()
+            return self
+
+    import contextlib
+    ppo_trainer.ref_model = _CausalLMRefWrapper(ref_base)
+    ppo_trainer.is_peft_model = False                    # 不走 disable_adapter
+    ppo_trainer.optional_peft_ctx = contextlib.nullcontext  # 不走 disable_adapter
+    print("  ✅ ref_model injected (no ValueHead, frozen, explicit KL path)")
 
     # ── 梯度拦截器 ──
     metric_cache = {"second_moment": 0.0, "total_norm": 0.0, "layer_stats": {}}
@@ -341,12 +367,14 @@ def train(args):
             print(f"  id(ref_model) = {id(ppo_trainer.ref_model)}")
             print(f"  model is ref  = {ppo_trainer.model is ppo_trainer.ref_model}")
             print(f"  is_peft_model = {ppo_trainer.is_peft_model}")
-            print(f"  ref_model type= {type(ppo_trainer.ref_model)}")
+            print(f"  ref_model type= {type(ppo_trainer.ref_model).__name__}")
             print(f"  kl_penalty    = {ppo_trainer.config.kl_penalty}")
             print(f"  kl_coef       = {ppo_trainer.kl_ctl.value}")
-            n_grad = sum(p.requires_grad for p in ppo_trainer.ref_model.parameters())
-            n_total = sum(1 for _ in ppo_trainer.ref_model.parameters())
+            ref_inner = getattr(ppo_trainer.ref_model, 'pretrained_model', ppo_trainer.ref_model)
+            n_grad = sum(p.requires_grad for p in ref_inner.parameters())
+            n_total = sum(1 for _ in ref_inner.parameters())
             print(f"  ref params    = {n_total} total, {n_grad} trainable (should be 0)")
+            print(f"  ref has ValueHead = {hasattr(ppo_trainer.ref_model, 'v_head')}")
             print(f"{'='*60}\n")
 
         stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
