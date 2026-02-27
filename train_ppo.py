@@ -242,10 +242,7 @@ def train(args):
 
     dataset = MathDataset(args.data_file, tokenizer, env, max_samples=args.max_samples)
 
-    # ── 初始化 PPOTrainer（先不传 ref_model，之后注入）──
-    # TRL 要求 ref_model 是 AutoModelForCausalLMWithValueHead，
-    # 但我们的 ref 是纯 CausalLM。解决方案：先让 TRL 用 PEFT 模式初始化，
-    # 再手动注入 ref_model 并关闭 disable_adapter 机制。
+    # ── 初始化 PPOTrainer（先不传 ref_model，之后注入以绕过 init 检查）──
     ppo_trainer = PPOTrainer(
         config=config,
         model=model,
@@ -255,32 +252,27 @@ def train(args):
         data_collator=collator
     )
 
-    # ── 注入无 ValueHead 的 ref_model ──
-    # 薄包装器：让 CausalLM 输出兼容 TRL 的 (logits, _, values) 解包
-    class _CausalLMRefWrapper(torch.nn.Module):
-        def __init__(self, causal_lm):
-            super().__init__()
-            self.pretrained_model = causal_lm
-
-        def forward(self, **kwargs):
-            out = self.pretrained_model(**kwargs)
-            # TRL batched_forward_pass 解包: logits, _, values = model(...)
-            # ref 的 values 从不使用，返回 dummy zeros
-            dummy_values = torch.zeros(
-                out.logits.shape[0], out.logits.shape[1],
-                device=out.logits.device, dtype=out.logits.dtype
-            )
-            return (out.logits, out.loss, dummy_values)
-
-        def eval(self):
-            self.pretrained_model.eval()
-            return self
+    # ── 注入无 ValueHead 的 ref_model (保持 AutoModelForCausalLM 类型) ──
+    # TRL batched_forward_pass 会解包 3 个值: ref_logits, _, _ = self.ref_model(...)
+    # 而普通的 CausalLM 返回 CausalLMOutputWithPast (通常解包出 2 个值)。
+    # 我们用补丁直接修改 forward，使得类型原汁原味，又能通过 TRL 的元组解包：
+    original_forward = ref_base.forward
+    def patched_forward(*args, **kwargs):
+        out = original_forward(*args, **kwargs)
+        # 用一组 dummy 值凑足 TRL 期望的 3 元组 (logits, loss, values)
+        dummy_values = torch.zeros(
+            out.logits.shape[0], out.logits.shape[1],
+            device=out.logits.device, dtype=out.logits.dtype
+        )
+        return (out.logits, out.loss, dummy_values)
+    
+    ref_base.forward = patched_forward
 
     import contextlib
-    ppo_trainer.ref_model = _CausalLMRefWrapper(ref_base)
-    ppo_trainer.is_peft_model = False                    # 不走 disable_adapter
-    ppo_trainer.optional_peft_ctx = contextlib.nullcontext  # 不走 disable_adapter
-    print("  ✅ ref_model injected (no ValueHead, frozen, explicit KL path)")
+    ppo_trainer.ref_model = ref_base                     # 直接就是 PeftModel/AutoModel
+    ppo_trainer.is_peft_model = False                    # 彻底关闭 disable_adapter 机制
+    ppo_trainer.optional_peft_ctx = contextlib.nullcontext
+    print("  ✅ ref_model injected (AutoModelForCausalLM, frozen)")
 
     # ── 梯度拦截器 ──
     metric_cache = {"second_moment": 0.0, "total_norm": 0.0, "layer_stats": {}}
@@ -289,6 +281,9 @@ def train(args):
         original_step = ppo_trainer.optimizer.step
 
         def hooked_optimizer_step(*args_inner, **kwargs_inner):
+            # 强制执行一次独立的梯度裁剪（防止 TRL 设置失效导致 KL 爆炸）
+            torch.nn.utils.clip_grad_norm_(ppo_trainer.model.parameters(), 0.5)
+
             sm = 0.0
             tn = 0.0
             pc = 0
@@ -371,9 +366,10 @@ def train(args):
             print(f"  ref_model type= {type(ppo_trainer.ref_model).__name__}")
             print(f"  kl_penalty    = {ppo_trainer.config.kl_penalty}")
             print(f"  kl_coef       = {ppo_trainer.kl_ctl.value}")
-            ref_inner = getattr(ppo_trainer.ref_model, 'pretrained_model', ppo_trainer.ref_model)
-            n_grad = sum(p.requires_grad for p in ref_inner.parameters())
-            n_total = sum(1 for _ in ref_inner.parameters())
+            
+            # 由于去掉了 _CausalLMRefWrapper，现在 ref_model 就是 ref_base (PeftModel)
+            n_grad = sum(p.requires_grad for p in ppo_trainer.ref_model.parameters())
+            n_total = sum(1 for _ in ppo_trainer.ref_model.parameters())
             print(f"  ref params    = {n_total} total, {n_grad} trainable (should be 0)")
             print(f"  ref has ValueHead = {hasattr(ppo_trainer.ref_model, 'v_head')}")
             print(f"{'='*60}\n")
