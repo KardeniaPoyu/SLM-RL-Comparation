@@ -127,7 +127,7 @@ def parse_args():
                         help="梯度累积 (batch/mini_batch)")
 
     # ── 优化器 ──
-    parser.add_argument("--lr", type=float, default=1e-6, help="学习率 (PPO 需比 SFT 更保守)")
+    parser.add_argument("--lr", type=float, default=5e-7, help="学习率 (保守值防止 KL 爆炸)")
     parser.add_argument("--init-kl-coef", type=float, default=0.2,
                         help="KL 惩罚系数 (abs 模式下需较大以抑制 KL 爆炸)")
     parser.add_argument("--clip-range", type=float, default=0.2, help="PPO clip range")
@@ -240,6 +240,7 @@ def train(args):
         init_kl_coef=args.init_kl_coef,
         adap_kl_ctrl=args.adaptive_kl,
         cliprange=args.clip_range,
+        max_grad_norm=0.5,             # 强制梯度裁剪，防止梯度爆炸
         kl_penalty="abs"  # 用 |logp - ref_logp| 防止负 KL 被利用
     )
 
@@ -325,8 +326,8 @@ def train(args):
             print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
 
         reward_vals, correct_count = compute_rewards_parallel(input_nums, responses)
-        rewards = [torch.tensor(r, dtype=torch.float32, device=ppo_trainer.accelerator.device)
-                   for r in reward_vals]
+        rewards = [torch.tensor(r * 0.05, dtype=torch.float32, device=ppo_trainer.accelerator.device)
+                   for r in reward_vals]  # reward scaling: 缩小 reward 幅度防止梯度过大
 
         gc.collect()                # 回收 Python 引用，释放 tensor 持有的显存
         torch.cuda.empty_cache()    # 释放 CUDA 缓存，为 training step 腾出空间
