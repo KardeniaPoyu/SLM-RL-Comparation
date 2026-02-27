@@ -51,6 +51,7 @@ echo ""
 # ========================================
 echo "── Step 0: 检查依赖 ──"
 pip install -r requirements.txt -q
+python -c "import numpy; v=numpy.__version__; print(f'numpy={v}'); assert v.startswith('1.26'), f'需要 numpy 1.26.x, 当前 {v}'"
 echo "✅ 依赖就绪"
 echo ""
 
