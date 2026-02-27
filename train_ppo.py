@@ -184,7 +184,7 @@ def train(args):
     csv_writer = csv.writer(log_file)
     csv_writer.writerow([
         "step", "success_rate", "value_loss", "policy_entropy",
-        "kl_div", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment", "mean_response_length",
+        "kl_ref", "approxkl", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment", "mean_response_length",
         "vram_allocated_gb", "vram_peak_gb", "vram_reserved_gb"
     ])
 
@@ -306,14 +306,43 @@ def train(args):
 
         gc.collect()                # 回收 Python 引用，释放 tensor 持有的显存
         torch.cuda.empty_cache()    # 释放 CUDA 缓存，为 training step 腾出空间
+
+        # ── step-0 诊断：ref_model 结构 ──
+        if step == 0:
+            print(f"\n{'='*60}")
+            print(f"  [DEBUG] PPO ref_model 诊断")
+            print(f"{'='*60}")
+            print(f"  id(model)     = {id(ppo_trainer.model)}")
+            print(f"  id(ref_model) = {id(ppo_trainer.ref_model)}")
+            print(f"  model is ref  = {ppo_trainer.model is ppo_trainer.ref_model}")
+            print(f"  is_peft_model = {ppo_trainer.is_peft_model}")
+            print(f"  ref_model     = {type(ppo_trainer.ref_model)}")
+            print(f"  kl_penalty    = {ppo_trainer.config.kl_penalty}")
+            print(f"  kl_coef       = {ppo_trainer.kl_ctl.value}")
+            if ppo_trainer.ref_model is not None:
+                n_grad = sum(p.requires_grad for p in ppo_trainer.ref_model.parameters())
+                print(f"  ref grad params = {n_grad}")
+            else:
+                print(f"  ref_model is None (PEFT mode: uses disable_adapter)")
+            print(f"{'='*60}\n")
+
         stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
+
+        # ── step-0 诊断：stats keys & KL 值 ──
+        if step == 0:
+            print(f"\n[DEBUG] stats keys: {sorted(stats.keys())}")
+            print(f"[DEBUG] objective/kl       = {stats.get('objective/kl', 'N/A')}")
+            print(f"[DEBUG] ppo/policy/approxkl = {stats.get('ppo/policy/approxkl', 'N/A')}")
+            print(f"[DEBUG] ppo/policy/policykl = {stats.get('ppo/policy/policykl', 'N/A')}")
+            print(f"[DEBUG] objective/kl_coef   = {stats.get('objective/kl_coef', 'N/A')}")
 
         # ── 将所有 stats 值强制转为 Python float ──
 
         success_rate = _to_float(correct_count / len(rewards))
         val_loss = _to_float(stats.get("ppo/loss/value", 0.0))
         policy_entropy = _to_float(stats.get("ppo/policy/entropy", 0.0))
-        kl = _to_float(stats.get("ppo/policy/approxkl", 0.0))
+        kl_ref = _to_float(stats.get("objective/kl", 0.0))      # policy vs reference KL (真正的 KL)
+        approxkl = _to_float(stats.get("ppo/policy/approxkl", 0.0))  # PPO ratio-KL (当前 vs rollout)
         returns = _to_float(stats.get("ppo/returns/mean", 0.0))
         vpred = _to_float(stats.get("ppo/val/vpred", 0.0))
         mean_adv = _to_float(returns - vpred)
@@ -329,7 +358,7 @@ def train(args):
         torch.cuda.reset_peak_memory_stats()  # 重置峰值以追踪每步
 
         csv_writer.writerow([
-            step, success_rate, val_loss, policy_entropy, kl,
+            step, success_rate, val_loss, policy_entropy, kl_ref, approxkl,
             mean_adv, adv_std, total_norm, second_moment, resp_lens,
             f"{vram_alloc:.2f}", f"{vram_peak:.2f}", f"{vram_reserved:.2f}"
         ])
@@ -345,7 +374,7 @@ def train(args):
 
         mean_reward = float(torch.stack(rewards).mean().item())
         print(f"Update {step} | Succ: {success_rate:.3f} | R: {mean_reward:.2f} | "
-              f"KL: {kl:.4f} | VLoss: {val_loss:.4f} | |g|: {total_norm:.4f} | "
+              f"KL(ref): {kl_ref:.4f} | VLoss: {val_loss:.4f} | |g|: {total_norm:.4f} | "
               f"VRAM: {vram_alloc:.1f}/{vram_peak:.1f} GB")
         step += 1
 
