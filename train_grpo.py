@@ -93,6 +93,7 @@ def parse_args():
     # ── 路径 ──
     parser.add_argument("--data-file", type=str, default="data/train.csv", help="训练数据路径")
     parser.add_argument("--sft-path", type=str, default="saved_models/sft_final", help="SFT 预训练权重路径")
+    parser.add_argument("--resume-step", type=int, default=0, help="从指定的 update_step 继续训练日志和步数统计")
     parser.add_argument("--output-dir", type=str, default="saved_models", help="模型保存目录")
     parser.add_argument("--log-dir", type=str, default="logs", help="日志目录")
 
@@ -137,21 +138,26 @@ def train(args):
 
     # ── 日志文件 ──
     log_tag = f"grpo_G{G}"
-    log_file = open(os.path.join(args.log_dir, f'{log_tag}_metrics.csv'), 'w', newline='')
+    mode = 'a' if args.resume_step > 0 else 'w'
+    log_file = open(os.path.join(args.log_dir, f'{log_tag}_metrics.csv'), mode, newline='')
     csv_writer = csv.writer(log_file)
-    csv_writer.writerow([
-        "step", "success_rate", "policy_entropy",
-        "kl_div", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment", "mean_response_length",
-        "vram_allocated_gb", "vram_peak_gb", "vram_reserved_gb"
-    ])
+    if args.resume_step == 0:
+        csv_writer.writerow([
+            "step", "success_rate", "policy_entropy",
+            "kl_div", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment", "mean_response_length",
+            "vram_allocated_gb", "vram_peak_gb", "vram_reserved_gb"
+        ])
 
-    response_file = open(os.path.join(args.log_dir, f'{log_tag}_responses.txt'), 'w', encoding='utf-8')
-    response_file.write(f"=== GRPO G={G} Training Responses ===\n\n")
+    response_file = open(os.path.join(args.log_dir, f'{log_tag}_responses.txt'), mode, encoding='utf-8')
+    if args.resume_step == 0:
+        response_file.write(f"=== GRPO G={G} Training Responses ===\n\n")
+    else:
+        response_file.write(f"\n=== Resumed GRPO G={G} Training from update_step {args.resume_step} ===\n\n")
 
     # 逐层梯度日志
     layer_grad_file = None
     if args.log_layer_grads:
-        layer_grad_file = open(os.path.join(args.log_dir, f'{log_tag}_layer_grads.jsonl'), 'w')
+        layer_grad_file = open(os.path.join(args.log_dir, f'{log_tag}_layer_grads.jsonl'), mode)
 
     # ── 模型加载 ──
     env = Arithmetic24Env()
@@ -183,8 +189,8 @@ def train(args):
         "eos_token_id": tokenizer.eos_token_id,
     }
 
-    step = 0
-    update_step = 0
+    update_step = args.resume_step
+    step = args.resume_step * accum
     device = model.device
     optimizer.zero_grad()
     training_done = False  # 用于跳出双层循环

@@ -143,6 +143,7 @@ def parse_args():
     # ── 路径 ──
     parser.add_argument("--data-file", type=str, default="data/train.csv")
     parser.add_argument("--sft-path", type=str, default="saved_models/sft_final")
+    parser.add_argument("--resume-step", type=int, default=0, help="从指定的 step 继续训练日志和步数统计")
     parser.add_argument("--output-dir", type=str, default="saved_models")
     parser.add_argument("--log-dir", type=str, default="logs")
 
@@ -181,20 +182,25 @@ def train(args):
     os.makedirs(args.output_dir, exist_ok=True)
 
     # ── 日志文件 ──
-    log_file = open(os.path.join(args.log_dir, 'ppo_metrics.csv'), 'w', newline='')
+    mode = 'a' if args.resume_step > 0 else 'w'
+    log_file = open(os.path.join(args.log_dir, 'ppo_metrics.csv'), mode, newline='')
     csv_writer = csv.writer(log_file)
-    csv_writer.writerow([
-        "step", "success_rate", "value_loss", "policy_entropy",
-        "kl_ref", "approxkl", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment", "mean_response_length",
-        "vram_allocated_gb", "vram_peak_gb", "vram_reserved_gb"
-    ])
+    if args.resume_step == 0:
+        csv_writer.writerow([
+            "step", "success_rate", "value_loss", "policy_entropy",
+            "kl_ref", "approxkl", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment", "mean_response_length",
+            "vram_allocated_gb", "vram_peak_gb", "vram_reserved_gb"
+        ])
 
-    response_file = open(os.path.join(args.log_dir, 'ppo_responses.txt'), 'w', encoding='utf-8')
-    response_file.write("=== PPO Training Responses ===\n\n")
+    response_file = open(os.path.join(args.log_dir, 'ppo_responses.txt'), mode, encoding='utf-8')
+    if args.resume_step == 0:
+        response_file.write("=== PPO Training Responses ===\n\n")
+    else:
+        response_file.write(f"\n=== Resumed PPO Training from step {args.resume_step} ===\n\n")
 
     layer_grad_file = None
     if args.log_layer_grads:
-        layer_grad_file = open(os.path.join(args.log_dir, 'ppo_layer_grads.jsonl'), 'w')
+        layer_grad_file = open(os.path.join(args.log_dir, 'ppo_layer_grads.jsonl'), mode)
 
     # ── 模型加载 ──
     env = Arithmetic24Env()
@@ -330,7 +336,7 @@ def train(args):
             return float(v.item())
         return float(v)
 
-    step = 0
+    step = args.resume_step
     for epoch, batch in enumerate(ppo_trainer.dataloader):
         query_tensors = batch["query"]
         prompts = batch["prompt"]
