@@ -206,6 +206,7 @@ def train(args):
         lora_resume_path=sft_path,
         gradient_checkpointing=True
     )
+    model.is_peft_model = True  # ValueHead.forward() 需要此属性 (LoRA 会跳过 PREFIX_TUNING 分支)
 
     # 2. Reference model (frozen): base 8-bit + LoRA, 无 ValueHead
     print("\n[2/2] Loading reference model (no ValueHead, frozen)...")
