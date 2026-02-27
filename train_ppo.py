@@ -136,7 +136,7 @@ def parse_args():
 
     # ── 训练控制 ──
     parser.add_argument("--max-new-tokens", type=int, default=128, help="生成最大长度 (24点答案通常<80 tokens)")
-    parser.add_argument("--save-every", type=int, default=2)
+    parser.add_argument("--save-every", type=int, default=40)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--max-steps", type=int, default=200, help="最多更新的 step 数量，到达则停止训练并保存模型")
 
