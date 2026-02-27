@@ -91,7 +91,7 @@ if [ "$ONLY_GRPO" = false ]; then
         --adaptive-kl \
         --ppo-epochs 1 \
         --max-steps 200 \
-        --save-every 40 \
+        --save-every 1 \
         --log-layer-grads
     echo ""
 fi
