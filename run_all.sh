@@ -73,7 +73,7 @@ if [ "$SKIP_SFT" = false ] && [ "$ONLY_GRPO" = false ] && [ "$ONLY_PPO" = false 
         --data data/sft_train.csv \
         --epochs 4 \
         --lr 2e-4 \
-        --batch-size 4
+        --batch-size 2
     echo ""
 fi
 
@@ -85,8 +85,8 @@ if [ "$ONLY_GRPO" = false ]; then
     python train_ppo.py \
         --lr 5e-7 \
         --batch-size 64 \
-        --mini-batch-size 8 \
-        --grad-accum-steps 8 \
+        --mini-batch-size 4 \
+        --grad-accum-steps 16 \
         --init-kl-coef 0.2 \
         --adaptive-kl \
         --ppo-epochs 1 \
@@ -101,31 +101,31 @@ fi
 if [ "$ONLY_PPO" = false ]; then
     echo "── Step 4: GRPO G 消融实验 ──"
 
-    # G=8:  bs=16, B_eff = 16*8  = 128
+    # G=8:  bs=8, B_eff = 8*8 = 64
     echo "  → G=8"
     python train_grpo.py \
-        --group-size 8 --batch-size 16 --accum-steps 1 \
+        --group-size 8 --batch-size 8 --accum-steps 1 \
         --lr 5e-6 --beta 0.04 \
         --save-every 40 --log-layer-grads
 
-    # G=16: bs=8, B_eff = 8*16  = 128
+    # G=16: bs=4, B_eff = 4*16 = 64
     echo "  → G=16"
     python train_grpo.py \
-        --group-size 16 --batch-size 8 --accum-steps 1 \
+        --group-size 16 --batch-size 4 --accum-steps 1 \
         --lr 5e-6 --beta 0.04 \
         --save-every 40 --log-layer-grads
 
-    # G=32: bs=4, B_eff = 4*32  = 128
+    # G=32: bs=2, B_eff = 2*32 = 64
     echo "  → G=32"
     python train_grpo.py \
-        --group-size 32 --batch-size 4 --accum-steps 1 \
+        --group-size 32 --batch-size 2 --accum-steps 1 \
         --lr 5e-6 --beta 0.04 \
         --save-every 40 --log-layer-grads
 
-    # G=64: bs=2, B_eff = 2*64  = 128
+    # G=64: bs=1, B_eff = 1*64 = 64
     echo "  → G=64"
     python train_grpo.py \
-        --group-size 64 --batch-size 2 --accum-steps 1 \
+        --group-size 64 --batch-size 1 --accum-steps 1 \
         --lr 5e-6 --beta 0.04 \
         --save-every 40 --log-layer-grads
 
