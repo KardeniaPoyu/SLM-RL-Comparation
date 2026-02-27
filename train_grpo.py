@@ -309,7 +309,7 @@ def train(args):
             model.train()
             model.gradient_checkpointing_enable(
                 gradient_checkpointing_kwargs={"use_reentrant": False}
-            )  # 训练阶段重新启用 (use_reentrant=False 兼容 4-bit)
+            )  # 训练阶段重新启用 (use_reentrant=False 兼容 8-bit)
             total_entropy = 0
             total_kl = 0
 
