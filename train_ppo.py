@@ -311,6 +311,7 @@ def train(args):
         "pad_token_id": tokenizer.pad_token_id,
         "eos_token_id": tokenizer.eos_token_id,
         "max_new_tokens": args.max_new_tokens,
+        "use_cache": True,  # 显式开启缓存，加速生成
     }
 
     # ── 安全转换函数：防止 numpy scalar 的 __str__ 崩溃 ──
@@ -329,12 +330,17 @@ def train(args):
         input_nums = batch["input_nums"]
 
         with torch.no_grad():
+            ppo_trainer.model.eval()  # 生成阶段必须使用 eval 模式，避免产生 gradient checkpointing 警告，并停用 dropout
             response_tensors = []
             gen_chunk = 4  # PPO 分块生成 (调小至 4 防止 7B OOM)
             for i in range(0, len(query_tensors), gen_chunk):
                 batch_q = [q.to(ppo_trainer.accelerator.device) for q in query_tensors[i:i + gen_chunk]]
-                batch_resp = ppo_trainer.generate(batch_q, return_prompt=False, **gen_kwargs)
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+                    batch_resp = ppo_trainer.generate(batch_q, return_prompt=False, **gen_kwargs)
                 response_tensors.extend(batch_resp)
+            ppo_trainer.model.train()  # 恢复训练模式
         
         resp_lens = float(torch.stack([(r != tokenizer.pad_token_id).float().sum() for r in response_tensors]).mean().item())
 

@@ -85,6 +85,7 @@ def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-7B-Instruct",
         inner_model.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": False}
         )
+        inner_model.config.use_cache = False  # 禁用 config 层面的 cache，避免 transformers 抛出显式警告，生成时再强行 kwargs 传入开启
         print("  ✅ Gradient checkpointing enabled (use_reentrant=False)")
     else:
         print("  ⏭️ Gradient checkpointing disabled (sufficient VRAM)")
