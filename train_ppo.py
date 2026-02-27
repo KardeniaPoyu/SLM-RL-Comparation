@@ -127,11 +127,11 @@ def parse_args():
                         help="梯度累积 (batch/mini_batch)")
 
     # ── 优化器 ──
-    parser.add_argument("--lr", type=float, default=3e-6, help="学习率 (论文建议 3e-6)")
-    parser.add_argument("--init-kl-coef", type=float, default=0.01,
-                        help="KL 惩罚系数 (abs 模式下适当降低)")
+    parser.add_argument("--lr", type=float, default=1e-6, help="学习率 (PPO 需比 SFT 更保守)")
+    parser.add_argument("--init-kl-coef", type=float, default=0.2,
+                        help="KL 惩罚系数 (abs 模式下需较大以抑制 KL 爆炸)")
     parser.add_argument("--clip-range", type=float, default=0.2, help="PPO clip range")
-    parser.add_argument("--target-kl", type=float, default=0.1, help="KL 目标上限")
+    parser.add_argument("--target-kl", type=float, default=2.0, help="自适应 KL 目标值")
     parser.add_argument("--ppo-epochs", type=int, default=1, help="PPO 更新轮数 (对齐 GRPO)")
 
     # ── 训练控制 ──
@@ -153,8 +153,8 @@ def parse_args():
     parser.add_argument("--top-p", type=float, default=0.95)
 
     # ── 自适应 KL ──
-    parser.add_argument("--adaptive-kl", action="store_true", default=False,
-                        help="启用 TRL 内置自适应 KL (默认关闭以对齐 GRPO)")
+    parser.add_argument("--adaptive-kl", action="store_true", default=True,
+                        help="启用 TRL 自适应 KL (防止 KL 爆炸)")
 
     return parser.parse_args()
 
