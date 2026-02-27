@@ -128,8 +128,8 @@ def parse_args():
 
     # ── 优化器 ──
     parser.add_argument("--lr", type=float, default=3e-6, help="学习率 (论文建议 3e-6)")
-    parser.add_argument("--init-kl-coef", type=float, default=0.04,
-                        help="KL 惩罚系数 (对齐 GRPO beta=0.04)")
+    parser.add_argument("--init-kl-coef", type=float, default=0.01,
+                        help="KL 惩罚系数 (abs 模式下适当降低)")
     parser.add_argument("--clip-range", type=float, default=0.2, help="PPO clip range")
     parser.add_argument("--target-kl", type=float, default=0.1, help="KL 目标上限")
     parser.add_argument("--ppo-epochs", type=int, default=1, help="PPO 更新轮数 (对齐 GRPO)")
@@ -184,7 +184,8 @@ def train(args):
     csv_writer = csv.writer(log_file)
     csv_writer.writerow([
         "step", "success_rate", "value_loss", "policy_entropy",
-        "kl_div", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment", "mean_response_length"
+        "kl_div", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment", "mean_response_length",
+        "vram_allocated_gb", "vram_peak_gb", "vram_reserved_gb"
     ])
 
     response_file = open(os.path.join(args.log_dir, 'ppo_responses.txt'), 'w', encoding='utf-8')
@@ -214,7 +215,8 @@ def train(args):
         ppo_epochs=args.ppo_epochs,
         init_kl_coef=args.init_kl_coef,
         adap_kl_ctrl=args.adaptive_kl,
-        cliprange=args.clip_range
+        cliprange=args.clip_range,
+        kl_penalty="abs"  # 用 |logp - ref_logp| 防止负 KL 被利用
     )
 
     dataset = MathDataset(args.data_file, tokenizer, env, max_samples=args.max_samples)
@@ -320,9 +322,16 @@ def train(args):
         total_norm = _to_float(metric_cache["total_norm"])
         second_moment = _to_float(metric_cache["second_moment"])
 
+        # ── VRAM 监控 ──
+        vram_alloc = torch.cuda.memory_allocated() / 1e9
+        vram_peak = torch.cuda.max_memory_allocated() / 1e9
+        vram_reserved = torch.cuda.memory_reserved() / 1e9
+        torch.cuda.reset_peak_memory_stats()  # 重置峰值以追踪每步
+
         csv_writer.writerow([
             step, success_rate, val_loss, policy_entropy, kl,
-            mean_adv, adv_std, total_norm, second_moment, resp_lens
+            mean_adv, adv_std, total_norm, second_moment, resp_lens,
+            f"{vram_alloc:.2f}", f"{vram_peak:.2f}", f"{vram_reserved:.2f}"
         ])
         log_file.flush()
 
@@ -336,7 +345,8 @@ def train(args):
 
         mean_reward = float(torch.stack(rewards).mean().item())
         print(f"Update {step} | Succ: {success_rate:.3f} | R: {mean_reward:.2f} | "
-              f"KL: {kl:.4f} | VLoss: {val_loss:.4f} | |g|: {total_norm:.4f}")
+              f"KL: {kl:.4f} | VLoss: {val_loss:.4f} | |g|: {total_norm:.4f} | "
+              f"VRAM: {vram_alloc:.1f}/{vram_peak:.1f} GB")
         step += 1
 
         if step > 0 and step % args.save_every == 0:

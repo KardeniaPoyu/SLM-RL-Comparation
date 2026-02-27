@@ -140,7 +140,8 @@ def train(args):
     csv_writer = csv.writer(log_file)
     csv_writer.writerow([
         "step", "success_rate", "policy_entropy",
-        "kl_div", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment", "mean_response_length"
+        "kl_div", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment", "mean_response_length",
+        "vram_allocated_gb", "vram_peak_gb", "vram_reserved_gb"
     ])
 
     response_file = open(os.path.join(args.log_dir, f'{log_tag}_responses.txt'), 'w', encoding='utf-8')
@@ -412,16 +413,24 @@ def train(args):
                 avg_entropy = metric_acc["entropy"] / accum
                 avg_resp_len = metric_acc["resp_len"] / accum
 
+                # ── VRAM 监控 ──
+                vram_alloc = torch.cuda.memory_allocated() / 1e9
+                vram_peak = torch.cuda.max_memory_allocated() / 1e9
+                vram_reserved = torch.cuda.memory_reserved() / 1e9
+                torch.cuda.reset_peak_memory_stats()  # 重置峰值以追踪每步
+
                 csv_writer.writerow([
                     update_step, avg_succ, avg_entropy, avg_kl,
                     avg_adv, avg_adv_std,
                     grad_norm.item() if hasattr(grad_norm, 'item') else grad_norm,
-                    second_moment, avg_resp_len
+                    second_moment, avg_resp_len,
+                    f"{vram_alloc:.2f}", f"{vram_peak:.2f}", f"{vram_reserved:.2f}"
                 ])
                 log_file.flush()
 
                 print(f"Update {update_step} (Step {step}) | Succ: {avg_succ:.3f} | "
-                      f"R: {avg_adv:.2f} | KL: {avg_kl:.4f} | |g|: {grad_norm:.4f} | β: {beta:.4f}")
+                      f"R: {avg_adv:.2f} | KL: {avg_kl:.4f} | |g|: {grad_norm:.4f} | β: {beta:.4f} | "
+                      f"VRAM: {vram_alloc:.1f}/{vram_peak:.1f} GB")
 
                 if update_step > 0 and update_step % args.save_every == 0:
                     save_dir = os.path.join(args.output_dir, f"grpo_G{G}_update_{update_step}")

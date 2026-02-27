@@ -86,7 +86,7 @@ if [ "$ONLY_GRPO" = false ]; then
         --batch-size 64 \
         --mini-batch-size 8 \
         --grad-accum-steps 8 \
-        --init-kl-coef 0.04 \
+        --init-kl-coef 0.01 \
         --ppo-epochs 1 \
         --save-every 40 \
         --log-layer-grads
