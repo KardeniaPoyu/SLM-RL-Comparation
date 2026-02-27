@@ -65,7 +65,7 @@ def _compat_torch_tensor(data, *args, **kwargs):
 torch.tensor = _compat_torch_tensor
 
 from torch.utils.data import Dataset
-from trl import PPOTrainer, PPOConfig, create_reference_model
+from trl import PPOTrainer, PPOConfig
 from model_utils import load_model_and_tokenizer, collect_per_layer_grad_stats
 from env import Arithmetic24Env, compute_rewards_parallel
 
@@ -198,16 +198,36 @@ def train(args):
     # ── 模型加载 ──
     env = Arithmetic24Env()
     sft_path = args.sft_path if os.path.exists(args.sft_path) else None
+
+    # 1. Policy model (trainable): base 8-bit + LoRA + ValueHead
+    print("\n[1/2] Loading policy model...")
     model, tokenizer = load_model_and_tokenizer(
         with_value_head=True,
         lora_resume_path=sft_path,
-        gradient_checkpointing=True  # PPO 需要梯度检查点：policy + ref model + value head 同时占用显存
+        gradient_checkpointing=True
     )
 
-    # ── 显式创建独立的 reference model（冻结的 SFT 快照）──
-    print("Creating explicit reference model (frozen deep copy)...")
-    ref_model = create_reference_model(model)
-    print(f"  ✅ ref_model created: {sum(p.requires_grad for p in ref_model.parameters())} trainable params")
+    # 2. Reference model (frozen): 独立加载同样结构，冻结所有参数
+    print("\n[2/2] Loading independent reference model (frozen)...")
+    ref_model, _ = load_model_and_tokenizer(
+        with_value_head=True,
+        lora_resume_path=sft_path,
+        gradient_checkpointing=False  # ref 不训练，无需梯度检查点
+    )
+    for p in ref_model.parameters():
+        p.requires_grad = False
+    ref_model.eval()
+
+    # 强制禁用 PEFT disable_adapter 机制，让 TRL 使用显式 ref_model
+    # (安全：我们用 LoRA 不是 PREFIX_TUNING，此 flag 仅影响 PREFIX_TUNING 检查)
+    model.is_peft_model = False
+    ref_model.is_peft_model = False
+
+    n_policy_train = sum(p.requires_grad for p in model.parameters())
+    n_ref_train = sum(p.requires_grad for p in ref_model.parameters())
+    print(f"  Policy model:  {n_policy_train} trainable params")
+    print(f"  Ref model:     {n_ref_train} trainable params (should be 0)")
+    print(f"  model is ref:  {model is ref_model}  (should be False)")
 
     config = PPOConfig(
         learning_rate=args.lr,
