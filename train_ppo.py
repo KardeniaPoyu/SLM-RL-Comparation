@@ -289,7 +289,30 @@ def train(args):
 
     # ── 梯度拦截器 ──
     metric_cache = {"second_moment": 0.0, "total_norm": 0.0, "layer_stats": {}}
-    # (Removed hooked_optimizer_step as it breaks under gradient accumulation)
+
+    if hasattr(ppo_trainer, "optimizer"):
+        original_step = ppo_trainer.optimizer.step
+
+        def hooked_optimizer_step(*args_inner, **kwargs_inner):
+            sm = 0.0
+            tn = 0.0
+            pc = 0
+            for p in ppo_trainer.model.parameters():
+                if p.grad is not None:
+                    sm += (p.grad.data ** 2).mean().item()
+                    tn += p.grad.data.norm(2).item() ** 2
+                    pc += 1
+            if pc > 0:
+                metric_cache["second_moment"] = sm / pc
+                metric_cache["total_norm"] = tn ** 0.5
+
+            # 逐层梯度
+            if args.log_layer_grads:
+                metric_cache["layer_stats"] = collect_per_layer_grad_stats(ppo_trainer.model)
+
+            return original_step(*args_inner, **kwargs_inner)
+
+        ppo_trainer.optimizer.step = hooked_optimizer_step
 
     gen_kwargs = {
         "temperature": args.temperature,
