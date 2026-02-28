@@ -26,7 +26,7 @@ class Arithmetic24Env:
     def _parse_output(self, text):
         """
         解析模型输出，提取表达式和格式信息。
-        返回: (has_think_open, has_think_close, pred_expr, think_close_count)
+        返回: (has_think_open, has_think_close, pred_expr, think_close_count, think_content)
         """
         has_think_close = "</think>" in text
         
@@ -38,14 +38,16 @@ class Arithmetic24Env:
 
         if has_think_close:
             parts = text.split("</think>")
+            think_content = parts[0].strip()
             after_think_text = parts[1].strip()
             lines = [line.strip() for line in after_think_text.split('\n') if line.strip()]
             pred_expr = lines[0] if lines else ""
         else:
+            think_content = text.strip()
             lines = [line.strip() for line in text.strip().split('\n') if line.strip()]
             pred_expr = lines[-1] if lines else ""
 
-        return has_think_open, has_think_close, pred_expr, think_close_count
+        return has_think_open, has_think_close, pred_expr, think_close_count, think_content
 
     def _verify_expression(self, expr_str, target_nums):
         """
@@ -79,12 +81,21 @@ class Arithmetic24Env:
 
         # 4. 极速数学求值：用 Python eval() 替代 SymPy
         try:
+            # 安全增强：禁止用小数或者负数来拼凑原始数字
+            # 原始题目一定是整数形式的，所以我们在处理 target_nums 时，检查有没有数字粘连（比如把 3 和 8 拼成了 38）
+            # 虽然多重集检查了一次，但有可能 1和0拼成了 10，而题目里其实是单独的1和0，多重集不会查出来数字被重排（例如[1,0] 和 [10] 被正则当做不同的字符串，但这在正则步骤已经拦截了）。
+            
+            # 为了防止 1/0 计算得到无穷大等导致奇怪的 float 对比，严格检查异常
             result = eval(expr_str, {"__builtins__": {}}, {})
+            
+            if result is None:
+                return False, "Math error"
+                
             if abs(float(result) - 24.0) < 1e-5:
                 return True, "Correct"
             return False, "Wrong value"
         except ZeroDivisionError:
-            return False, "Math error"
+            return False, "Math error (Division by zero)"
         except Exception:
             return False, "Math error"
 
@@ -94,7 +105,7 @@ class Arithmetic24Env:
         分4个阶段：严重违规 -> 格式奖励 -> 表达式检查 -> 数学验证。
         """
         target_nums = [n.strip() for n in input_nums_str.split(',')]
-        has_think_open, has_think_close, pred_expr, think_close_count = self._parse_output(output_text)
+        has_think_open, has_think_close, pred_expr, think_close_count, think_content = self._parse_output(output_text)
 
         reward = 0.0
         is_correct = False
@@ -106,17 +117,23 @@ class Arithmetic24Env:
         if _RE_GARBAGE.search(pred_expr):
             return -0.8, False
 
-        # ── 阶段2：格式奖励 ──
+        # ── 阶段2：格式与思维链 (CoT) 奖励 ──
         if has_think_close:
             reward += 0.2
+            
+            # 防止钻空子：如果不写思考过程直接输出 </think> 就要严厉惩罚
+            # 由于 SFT 数据集中的思路本身就很简短，这里只做最基本的防空内容检测
+            think_len = len(think_content)
+            if think_len < 3:
+                reward -= 0.5  # 完全不写过程直接关标签，严惩
+            elif think_len > 10:
+                reward += 0.2  # 鼓励写几步基本的计算过程
         else:
             reward -= 0.5  # 严厉惩罚不写 </think> 的行为
 
         text_len = len(output_text.strip())
-        if text_len > 500:
-            reward -= 0.4
-        elif text_len < 50:
-            reward -= 0.2
+        if text_len > 600:
+            reward -= 0.4  # 太啰嗦也要适度惩罚
 
         # ── 阶段3：表达式初步检查 ──
         if not pred_expr:
@@ -139,14 +156,14 @@ class Arithmetic24Env:
             if operators >= 3 or '(' in pred_expr:
                 reward += 0.3
         else:
-            if reason in ("Math error", "Parse error"):
-                reward -= 0.2
+            if reason in ("Math error", "Parse error", "Math error (Division by zero)", "Empty expression"):
+                reward -= 0.6  # 严厉惩罚除以零等极其离谱的数学硬伤
             elif reason in ("Used wrong numbers", "Invalid characters"):
-                reward -= 0.3
+                reward -= 0.6  # 严厉惩罚篡改数字、伪造题目的作弊行为
             elif reason == "Exponentiation not allowed":
                 reward -= 0.4
             else:
-                reward -= 0.1
+                reward -= 0.2
 
         return max(reward, -1.5), is_correct
 

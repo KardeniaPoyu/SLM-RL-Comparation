@@ -14,6 +14,7 @@ import itertools
 import json
 import os
 import random
+import re
 import argparse
 import ast
 from fractions import Fraction
@@ -163,17 +164,90 @@ def enumerate_valid_combinations(n, max_count=None):
     return valid
 
 
+def _get_random_failed_paths(digits, target_expr):
+    """
+    生成一些看似合理的错误尝试路径（回溯）。
+    """
+    ops = [('+', lambda a,b: a+b), ('-', lambda a,b: a-b), ('*', lambda a,b: a*b), ('/', lambda a,b: a/b if b!=0 else float('inf'))]
+    paths = []
+    
+    # 尝试生成 1~3 条错误路径
+    num_attempts = random.randint(1, 3)
+    
+    for _ in range(num_attempts):
+        # 挑两个数字随机合并
+        if len(digits) < 2: break
+        
+        idx1, idx2 = random.sample(range(len(digits)), 2)
+        d1, d2 = digits[idx1], digits[idx2]
+        op_sym, op_fn = random.choice(ops)
+        
+        # 避免除以0，也尽量避免刚好直接凑出最终答案里的子结构
+        try:
+            val1, val2 = float(d1), float(d2)
+            res = op_fn(val1, val2)
+        except:
+            continue
+            
+        # 美化数值
+        def fmt(v):
+            if isinstance(v, float) and v.is_integer(): return str(int(v))
+            if isinstance(v, float): return f"{v:.2f}"
+            return str(v)
+            
+        res_str = fmt(res)
+        d1_str = fmt(val1)
+        d2_str = fmt(val2)
+        
+        # 判断是不是无用分数或者太大的整数
+        reason = ""
+        if res == float('inf') or res < 0:
+            reason = "这个结果不在正常的计算路径上，显然不对劲。"
+        elif isinstance(res, float) and not res.is_integer() and '/' not in target_expr:
+            reason = "这产生了一个难以消除的分数，可能会越算越乱。"
+        elif res > 100:
+            reason = f"结果 {res_str} 太大了，剩下的数字很难把它变回 24。"
+        elif res == 24 and len(digits) > 2:
+            reason = "虽然这步得到了24，但规则要求所有数字必须都用上，所以不能这么算。"
+        else:
+            reason = "剩下的数字似乎无法组合成需要的差值或商，这条路走不通。"
+            
+        path_text = f"假设我先尝试：{d1_str} {op_sym} {d2_str} = {res_str}。\n{reason}\n看来这并不是正确的思路，我需要回溯（backtrack），换一种组合。\n\n"
+        
+        # 为了不完全重复，随机加点语气词
+        prefix = random.choice(["首先，", "让我们试探一下：", "也许可以这样：", "尝试提取两个数字："])
+        paths.append(prefix + path_text)
+        
+    return paths
+
 def generate_cot_from_expr(expr_str):
     """
-    将带括号的表达式解析为 AST，并生成逐步计算的中文推理链。
-    例如: "(3 + 5) * (8 - 5)" ->
-         "首先计算 3 + 5 = 8。然后计算 8 - 5 = 3。最后计算 8 * 3 = 24。"
+    为 7B 模型生成“高质量长搜索思维链 (Long-CoT)”。
+    不仅包含正确的步骤，还强制模型输出带有回溯的启发式搜索（Heuristic Deducing）过程。
     """
     clean = _simplify_expr(expr_str)
+    
+    # 获取此题目的所有使用到的数字
+    digits = re.findall(r'\d+', clean)
+    nums_str = ", ".join(digits)
+    
+    cot_parts = []
+    cot_parts.append(f"目标是通过加减乘除将数字 {nums_str} 计算得到 24。\n")
+    cot_parts.append(f"观察这些数字，我会先进行一些启发式的试探。\n\n")
+    
+    # 1. 插入伪造的回溯/失败尝试
+    failed_attempts = _get_random_failed_paths(digits, clean)
+    for attempt in failed_attempts:
+        cot_parts.append(attempt)
+        
+    cot_parts.append("经过前几次的试错，我开始寻找更可行的核心逻辑（例如找能不能凑出 3×8, 4×6, 或者 24×1 等关键节点）。\n")
+    cot_parts.append("让我仔细推导一条确定的路径：\n")
+    
+    # 2. 真实求解路径 (利用 AST 解析)
     try:
         tree = ast.parse(clean, mode='eval')
     except Exception:
-        return f"通过计算 {clean} 得到 24。"
+        return f"直接推导：{clean} = 24。"
 
     steps = []
     op_map = {
@@ -205,10 +279,8 @@ def generate_cot_from_expr(expr_str):
 
             # 美化数字显示
             def fmt(v):
-                if isinstance(v, float) and v == int(v):
-                    return str(int(v))
-                elif isinstance(v, float):
-                    return f"{v:.2f}"
+                if isinstance(v, float) and v == int(v): return str(int(v))
+                elif isinstance(v, float): return f"{v:.3f}".rstrip('0').rstrip('.')
                 return str(v)
 
             steps.append(f"计算 {fmt(left_val)} {op_sym} {fmt(right_val)} = {fmt(res)}")
@@ -219,15 +291,15 @@ def generate_cot_from_expr(expr_str):
 
     if not steps:
         return f"通过计算 {clean} 得到 24。"
-
-    cot_parts = []
+        
     for idx, step in enumerate(steps):
         if idx == 0:
-            cot_parts.append(f"首先{step}。")
+            cot_parts.append(f"第一步，{step}。\n")
         elif idx == len(steps) - 1:
-            cot_parts.append(f"最后{step}。")
+            cot_parts.append(f"最后一步，{step}。\n")
+            cot_parts.append(f"成功得到 24！推导完成，这条路径是正确的。\n")
         else:
-            cot_parts.append(f"然后{step}。")
+            cot_parts.append(f"接下来，{step}。\n")
 
     return "".join(cot_parts)
 
