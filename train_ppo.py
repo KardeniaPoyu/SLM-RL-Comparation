@@ -131,7 +131,7 @@ def parse_args():
     parser.add_argument("--init-kl-coef", type=float, default=0.1,
                         help="KL 惩罚系数 (适度放开)")
     parser.add_argument("--clip-range", type=float, default=0.2, help="PPO clip range")
-    parser.add_argument("--target-kl", type=float, default=2.0, help="自适应 KL 目标值")
+    parser.add_argument("--target-kl", type=float, default=0.1, help="自适应 KL 目标值 (锁紧，防止7B遗忘格式)")
     parser.add_argument("--ppo-epochs", type=int, default=2, help="PPO 更新轮数 (提高样本利用率)")
 
     # ── 训练控制 ──
@@ -349,7 +349,7 @@ def train(args):
             inner_m.config.use_cache = True
             
             response_tensors = []
-            gen_chunk = 4  # PPO 分块生成 (调小至 4 防止 7B OOM)
+            gen_chunk = 8  # PPO 分块生成 (调大至 8 加速推理时间，KV cache 一般占不满 24G)
             for i in range(0, len(query_tensors), gen_chunk):
                 batch_q = [q.to(ppo_trainer.accelerator.device) for q in query_tensors[i:i + gen_chunk]]
                 # 关闭 return_prompt 防止 prompt 污染模型回答，但需要 env 适应

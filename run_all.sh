@@ -83,10 +83,10 @@ fi
 if [ "$ONLY_GRPO" = false ]; then
     echo "── Step 3: PPO 训练 ──"
     python train_ppo.py \
-        --lr 5e-7 \
-        --batch-size 32 \
+        --lr 1e-7 \
+        --batch-size 16 \
         --mini-batch-size 2 \
-        --grad-accum-steps 16 \
+        --grad-accum-steps 8 \
         --init-kl-coef 0.2 \
         --adaptive-kl \
         --ppo-epochs 1 \
