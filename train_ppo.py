@@ -243,7 +243,7 @@ def train(args):
         batch_size=args.batch_size,
         mini_batch_size=args.mini_batch_size,
         gradient_accumulation_steps=args.grad_accum_steps,
-        target_kl=0.1,  # 允许更宽松的目标 KL，否则惩罚系数会失控爆炸
+        target_kl=1.0,  # 自适应 KL 目标：允许探索到 KL≈1 后开始加大惩罚
         seed=42,
         ppo_epochs=args.ppo_epochs,
         init_kl_coef=args.init_kl_coef,
