@@ -166,30 +166,29 @@ def enumerate_valid_combinations(n, max_count=None):
 
 def _get_random_failed_paths(digits, target_expr):
     """
-    生成一些看似合理的错误尝试路径（回溯）。
+    生成带状态追踪(State-Tracking)的错误尝试路径（回溯）。
     """
     ops = [('+', lambda a,b: a+b), ('-', lambda a,b: a-b), ('*', lambda a,b: a*b), ('/', lambda a,b: a/b if b!=0 else float('inf'))]
     paths = []
     
-    # 尝试生成 1~3 条错误路径
-    num_attempts = random.randint(1, 3)
+    # 尝试生成 1~2 条错误路径
+    num_attempts = random.randint(1, 2)
     
     for _ in range(num_attempts):
-        # 挑两个数字随机合并
         if len(digits) < 2: break
         
-        idx1, idx2 = random.sample(range(len(digits)), 2)
-        d1, d2 = digits[idx1], digits[idx2]
+        # 复制当前可用数字
+        current_digits = list(digits)
+        idx1, idx2 = random.sample(range(len(current_digits)), 2)
+        d1, d2 = current_digits[idx1], current_digits[idx2]
         op_sym, op_fn = random.choice(ops)
         
-        # 避免除以0，也尽量避免刚好直接凑出最终答案里的子结构
         try:
             val1, val2 = float(d1), float(d2)
             res = op_fn(val1, val2)
         except:
             continue
             
-        # 美化数值
         def fmt(v):
             if isinstance(v, float) and v.is_integer(): return str(int(v))
             if isinstance(v, float): return f"{v:.2f}"
@@ -199,49 +198,51 @@ def _get_random_failed_paths(digits, target_expr):
         d1_str = fmt(val1)
         d2_str = fmt(val2)
         
-        # 判断是不是无用分数或者太大的整数
+        # 从列表中移除用掉的数字，加入新结果
+        # 为了保证移除正确，按值移除一次
+        current_digits.remove(d1)
+        current_digits.remove(d2)
+        current_digits.append(res_str)
+        
+        remain_str = f"[{', '.join(current_digits)}]"
+        
         reason = ""
         if res == float('inf') or res < 0:
-            reason = "这个结果不在正常的计算路径上，显然不对劲。"
+            reason = "失败（路线无效）。回溯。"
         elif isinstance(res, float) and not res.is_integer() and '/' not in target_expr:
-            reason = "这产生了一个难以消除的分数，可能会越算越乱。"
+            reason = "失败（产生无法消除的分数）。回溯。"
         elif res > 100:
-            reason = f"结果 {res_str} 太大了，剩下的数字很难把它变回 24。"
-        elif res == 24 and len(digits) > 2:
-            reason = "虽然这步得到了24，但规则要求所有数字必须都用上，所以不能这么算。"
+            reason = "失败（结果过大）。回溯。"
+        elif res == 24 and len(current_digits) > 1:
+            reason = "失败（未用完所有数字）。回溯。"
         else:
-            reason = "剩下的数字似乎无法组合成需要的差值或商，这条路走不通。"
+            reason = "失败（无法凑出24）。回溯。"
             
-        path_text = f"假设我先尝试：{d1_str} {op_sym} {d2_str} = {res_str}。\n{reason}\n看来这并不是正确的思路，我需要回溯（backtrack），换一种组合。\n\n"
-        
-        # 为了不完全重复，随机加点语气词
-        prefix = random.choice(["首先，", "让我们试探一下：", "也许可以这样：", "尝试提取两个数字："])
-        paths.append(prefix + path_text)
+        path_text = f"尝试：\n{d1_str} {op_sym} {d2_str} = {res_str}。剩余: {remain_str}\n{reason}\n\n"
+        paths.append(path_text)
         
     return paths
 
 def generate_cot_from_expr(expr_str):
     """
-    为 7B 模型生成“高质量长搜索思维链 (Long-CoT)”。
-    不仅包含正确的步骤，还强制模型输出带有回溯的启发式搜索（Heuristic Deducing）过程。
+    生成状态追踪(State-Tracking)风格的 Long-CoT。
+    强制模型输出带有回溯的严谨深度优先搜索格式。
     """
     clean = _simplify_expr(expr_str)
     
     # 获取此题目的所有使用到的数字
-    digits = re.findall(r'\d+', clean)
-    nums_str = ", ".join(digits)
+    original_digits = re.findall(r'\d+', clean)
+    nums_str = ", ".join(original_digits)
     
     cot_parts = []
-    cot_parts.append(f"目标是通过加减乘除将数字 {nums_str} 计算得到 24。\n")
-    cot_parts.append(f"观察这些数字，我会先进行一些启发式的试探。\n\n")
+    cot_parts.append(f"目标：使用 {nums_str} 计算 24。\n\n")
     
     # 1. 插入伪造的回溯/失败尝试
-    failed_attempts = _get_random_failed_paths(digits, clean)
+    failed_attempts = _get_random_failed_paths(original_digits, clean)
     for attempt in failed_attempts:
         cot_parts.append(attempt)
         
-    cot_parts.append("经过前几次的试错，我开始寻找更可行的核心逻辑（例如找能不能凑出 3×8, 4×6, 或者 24×1 等关键节点）。\n")
-    cot_parts.append("让我仔细推导一条确定的路径：\n")
+    cot_parts.append("尝试：\n")
     
     # 2. 真实求解路径 (利用 AST 解析)
     try:
@@ -257,12 +258,13 @@ def generate_cot_from_expr(expr_str):
 
     def evaluate_node(node):
         if isinstance(node, ast.Constant):
-            return node.value
+            return node.value, str(node.value)
         elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-            return -evaluate_node(node.operand)
+            val, _ = evaluate_node(node.operand)
+            return -val, str(-val)
         elif isinstance(node, ast.BinOp):
-            left_val = evaluate_node(node.left)
-            right_val = evaluate_node(node.right)
+            left_val, left_str = evaluate_node(node.left)
+            right_val, right_str = evaluate_node(node.right)
             op = type(node.op)
             op_sym = op_map.get(op, '?')
 
@@ -277,29 +279,35 @@ def generate_cot_from_expr(expr_str):
             else:
                 res = 0
 
-            # 美化数字显示
             def fmt(v):
                 if isinstance(v, float) and v == int(v): return str(int(v))
                 elif isinstance(v, float): return f"{v:.3f}".rstrip('0').rstrip('.')
                 return str(v)
 
-            steps.append(f"计算 {fmt(left_val)} {op_sym} {fmt(right_val)} = {fmt(res)}")
-            return res
-        return 0
+            l_fmt, r_fmt, res_fmt = fmt(left_val), fmt(right_val), fmt(res)
+            steps.append((l_fmt, op_sym, r_fmt, res_fmt))
+            return res, res_fmt
+        return 0, "0"
 
     evaluate_node(tree.body)
 
     if not steps:
         return f"通过计算 {clean} 得到 24。"
         
-    for idx, step in enumerate(steps):
-        if idx == 0:
-            cot_parts.append(f"第一步，{step}。\n")
-        elif idx == len(steps) - 1:
-            cot_parts.append(f"最后一步，{step}。\n")
-            cot_parts.append(f"成功得到 24！推导完成，这条路径是正确的。\n")
+    # 按照严格的状态格式输出真实步骤
+    current_state = list(original_digits)
+    for idx, (l, op, r, res) in enumerate(steps):
+        # 从状态列表中移除用掉的数字（如果有的话，处理多重集）
+        if l in current_state: current_state.remove(l)
+        if r in current_state: current_state.remove(r)
+        current_state.append(res)
+        
+        remain_str = f"[{', '.join(current_state)}]"
+        
+        if idx == len(steps) - 1:
+            cot_parts.append(f"{l} {op} {r} = {res}。成功！\n")
         else:
-            cot_parts.append(f"接下来，{step}。\n")
+            cot_parts.append(f"{l} {op} {r} = {res}。剩余: {remain_str}\n")
 
     return "".join(cot_parts)
 

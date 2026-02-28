@@ -9,6 +9,7 @@ import re
 _RE_DIGITS = re.compile(r'\d+')
 _RE_WHITELIST = re.compile(r'[\d\+\-\*\/\(\)\s\.]+')
 _RE_GARBAGE = re.compile(r'[\u4e00-\u9fa5a-zA-Z]')
+_RE_EQUATION = re.compile(r'([\d\.\s\+\-\*\/\(\)]+)=([\s\-\d\.]+)')
 
 
 class Arithmetic24Env:
@@ -99,6 +100,47 @@ class Arithmetic24Env:
         except Exception:
             return False, "Math error"
 
+    def _evaluate_intermediate_steps(self, think_content):
+        """
+        [PRM] 验证状态追踪格式中的中间公式是否合法。
+        支持的新格式： 8 + 10 = 18。剩余: [13, 3, 18]
+        返回: (正确等式数量, 是否存在瞎编等式)
+        """
+        # 注意：这里的正则 _RE_EQUATION 在上方已被修改
+        equations = _RE_EQUATION.findall(think_content)
+        correct_count = 0
+        has_hallucination = False
+        
+        for left_expr, right_val in equations:
+            left_expr = left_expr.strip()
+            # 过滤掉句号和多余空白
+            right_val = right_val.replace('。', '').strip()
+            if not left_expr or not right_val:
+                continue
+                
+            # 清理无用字符
+            if not _RE_WHITELIST.fullmatch(left_expr):
+                continue
+                
+            try:
+                # 评估左边
+                left_result = eval(left_expr, {"__builtins__": {}}, {})
+                # 评估右边
+                right_result = float(right_val)
+                
+                # 避免一些极小浮点数差异
+                if abs(float(left_result) - right_result) < 1e-4:
+                    correct_count += 1
+                else:
+                    # 左边算出来不等于它声明的右边，这是严重的幻觉作弊
+                    has_hallucination = True
+                    break
+            except Exception:
+                has_hallucination = True
+                break
+                
+        return correct_count, has_hallucination
+
     def compute_reward(self, input_nums_str, output_text):
         """
         复合奖励函数 (RLVR)。
@@ -128,6 +170,13 @@ class Arithmetic24Env:
                 reward -= 0.5  # 完全不写过程直接关标签，严惩
             elif think_len > 10:
                 reward += 0.2  # 鼓励写几步基本的计算过程
+                
+            # ── [PRM 防御机制] 校验中间推导是否存在幻觉作弊 ──
+            correct_steps, has_hallucination = self._evaluate_intermediate_steps(think_content)
+            if has_hallucination:
+                reward -= 1.0  # ★ 严厉打击过程瞎编（如 8/13=2），避免 Reward Hacking
+            else:
+                reward += min(correct_steps * 0.1, 0.5)  # 鼓励踏实的中间推断（最多+0.5）
         else:
             reward -= 0.5  # 严厉惩罚不写 </think> 的行为
 
@@ -218,7 +267,9 @@ if __name__ == "__main__":
     print("Prompt Preview:\n", prompt)
 
     tests = [
-        ("3, 3, 8, 8", "<think>步骤</think>\n8 / (3 - 8/3)", "完整think结构+正确"),
+        ("3, 3, 8, 8", "<think>第一步：8 / 3 = 2.66\n第二步：3 - 2.66 = 0.34\n第三步：8 / 0.34 = 24</think>\n8 / (3 - 8/3)", "[PRM]正确中间推断+全对"),
+        ("3, 3, 8, 8", "<think>假设 8 / 13 = 2. 然后...</think>\n8 / (3 - 8/3)", "[PRM作弊]瞎编公式会被严惩"),
+        ("3, 3, 8, 8", "<think>步骤</think>\n8 / (3 - 8/3)", "只有文字+正确"),
         ("3, 3, 8, 8", "</think>\n8 / (3 - 8/3)", "仅闭合标签+正确"),
         ("3, 3, 8, 8", "</think>\n8 * 3", "错误数字"),
         ("3, 3, 8, 8", "</think>\n计算过程</think>\n8 / (3 - 8/3)", "多标签"),

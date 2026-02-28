@@ -102,31 +102,32 @@ fi
 if [ "$ONLY_PPO" = false ]; then
     echo "── Step 4: GRPO G 消融实验 ──"
 
-    # G=8:  bs=8, B_eff = 8*8 = 64
+    # G=8:  bs=4, accum=2, B_eff = 4*8*2 = 64
     echo "  → G=8"
     python train_grpo.py \
-        --group-size 8 --batch-size 8 --accum-steps 1 \
+        --group-size 8 --batch-size 4 --accum-steps 2 \
         --lr 5e-6 --beta 0.04 \
         --max-steps 200 \
         --save-every 10 --log-layer-grads
 
-    # G=16: bs=4, B_eff = 4*16 = 64
+    # G=16: bs=2, accum=2, B_eff = 2*16*2 = 64
     echo "  → G=16"
     python train_grpo.py \
-        --group-size 16 --batch-size 4 --accum-steps 1 \
+        --group-size 16 --batch-size 2 --accum-steps 2 \
         --lr 5e-6 --beta 0.04 \
         --max-steps 200 \
         --save-every 10 --log-layer-grads
 
-    # G=32: bs=2, B_eff = 2*32 = 64
+    # G=32: bs=1, accum=2, B_eff = 1*32*2 = 64
     echo "  → G=32"
     python train_grpo.py \
-        --group-size 32 --batch-size 2 --accum-steps 1 \
+        --group-size 32 --batch-size 1 --accum-steps 2 \
         --lr 5e-6 --beta 0.04 \
         --max-steps 200 \
         --save-every 10 --log-layer-grads
 
-    # G=64: bs=1, B_eff = 1*64 = 64
+    # G=64: bs=1, accum=1, B_eff = 1*64*1 = 64
+    # (GRPO内部已实现了generation和KL的chunking，bs=1是最小安全限度)
     echo "  → G=64"
     python train_grpo.py \
         --group-size 64 --batch-size 1 --accum-steps 1 \
