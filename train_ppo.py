@@ -120,19 +120,19 @@ def parse_args():
     parser = argparse.ArgumentParser(description="PPO Training")
 
     # ── 对齐参数 ──
-    parser.add_argument("--batch-size", type=int, default=32,
+    parser.add_argument("--batch-size", type=int, default=64,
                         help="PPO batch size (应等于 GRPO 的 bs×G×accum)")
     parser.add_argument("--mini-batch-size", type=int, default=4, help="PPO mini-batch")
-    parser.add_argument("--grad-accum-steps", type=int, default=8,
+    parser.add_argument("--grad-accum-steps", type=int, default=16,
                         help="梯度累积 (batch/mini_batch)")
 
     # ── 优化器 ──
-    parser.add_argument("--lr", type=float, default=1e-6, help="学习率 (适当提高加快收敛)")
+    parser.add_argument("--lr", type=float, default=2e-6, help="学习率 (适当提高加快收敛)")
     parser.add_argument("--init-kl-coef", type=float, default=0.1,
                         help="KL 惩罚系数 (适度放开)")
     parser.add_argument("--clip-range", type=float, default=0.2, help="PPO clip range")
     parser.add_argument("--target-kl", type=float, default=0.1, help="自适应 KL 目标值 (锁紧，防止7B遗忘格式)")
-    parser.add_argument("--ppo-epochs", type=int, default=2, help="PPO 更新轮数 (提高样本利用率)")
+    parser.add_argument("--ppo-epochs", type=int, default=4, help="PPO 更新轮数 (提高样本利用率)")
 
     # ── 训练控制 ──
     parser.add_argument("--max-new-tokens", type=int, default=512, help="生成最大长度 (需容纳 Long-CoT 的长思考过程)")
@@ -289,33 +289,7 @@ def train(args):
 
     # ── 梯度拦截器 ──
     metric_cache = {"second_moment": 0.0, "total_norm": 0.0, "layer_stats": {}}
-
-    if hasattr(ppo_trainer, "optimizer"):
-        original_step = ppo_trainer.optimizer.step
-
-        def hooked_optimizer_step(*args_inner, **kwargs_inner):
-            # 强制执行一次独立的梯度裁剪（防止 TRL 设置失效导致 KL 爆炸）
-            torch.nn.utils.clip_grad_norm_(ppo_trainer.model.parameters(), 1.5)
-
-            sm = 0.0
-            tn = 0.0
-            pc = 0
-            for p in ppo_trainer.model.parameters():
-                if p.grad is not None:
-                    sm += (p.grad.data ** 2).mean().item()
-                    tn += p.grad.data.norm(2).item() ** 2
-                    pc += 1
-            if pc > 0:
-                metric_cache["second_moment"] = sm / pc
-                metric_cache["total_norm"] = tn ** 0.5
-
-            # 逐层梯度
-            if args.log_layer_grads:
-                metric_cache["layer_stats"] = collect_per_layer_grad_stats(ppo_trainer.model)
-
-            return original_step(*args_inner, **kwargs_inner)
-
-        ppo_trainer.optimizer.step = hooked_optimizer_step
+    # (Removed hooked_optimizer_step as it breaks under gradient accumulation)
 
     gen_kwargs = {
         "temperature": args.temperature,
@@ -374,9 +348,9 @@ def train(args):
         reward_vals, correct_count = compute_rewards_parallel(input_nums, responses)
         
         # Reward Normalization (类 GRPO 的 Z-score 处理，或适当放缩)
-        # 用适当的 scaling 替代原来孱弱的 0.05
-        rewards = [torch.tensor(r * 0.2, dtype=torch.float32, device=ppo_trainer.accelerator.device)
-                   for r in reward_vals]  # reward scaling: 放大 reward 使正确与错误信号更强
+        # 直接使用任务给出的 RLVR reward（TRL 默认会对 advantage 进行归一化）
+        rewards = [torch.tensor(r, dtype=torch.float32, device=ppo_trainer.accelerator.device)
+                   for r in reward_vals]
 
         gc.collect()                # 回收 Python 引用，释放 tensor 持有的显存
         torch.cuda.empty_cache()    # 释放 CUDA 缓存，为 training step 腾出空间

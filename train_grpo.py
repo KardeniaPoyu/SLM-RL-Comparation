@@ -76,7 +76,7 @@ def parse_args():
                         help="梯度累积步数 (默认1, 即每步更新)")
 
     # ── 优化器 ──
-    parser.add_argument("--lr", type=float, default=1e-5, help="学习率 (提高)")
+    parser.add_argument("--lr", type=float, default=2e-6, help="学习率 (提高)")
     parser.add_argument("--beta", type=float, default=0.04, help="KL 惩罚系数")
     parser.add_argument("--clip-eps", type=float, default=0.2, help="PPO clip 范围")
     parser.add_argument("--max-grad-norm", type=float, default=0.5, help="梯度裁剪，缩紧以防止爆炸")
@@ -84,7 +84,7 @@ def parse_args():
 
     # ── 训练控制 ──
     parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
-    parser.add_argument("--ppo-epochs", type=int, default=2, help="每次 rollout 的 PPO 更新轮数 (提高样本利用率)")
+    parser.add_argument("--ppo-epochs", type=int, default=4, help="每次 rollout 的 PPO 更新轮数 (提高样本利用率)")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="生成最大长度 (需容纳 Long-CoT 的长思考过程)")
     parser.add_argument("--save-every", type=int, default=10, help="每 N 个 update 保存一次")
     parser.add_argument("--max-samples", type=int, default=None, help="限制训练样本数")
