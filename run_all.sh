@@ -84,11 +84,11 @@ if [ "$ONLY_GRPO" = false ]; then
     echo "── Step 3: PPO 训练 ──"
     python train_ppo.py \
         --lr 2e-6 \
-        --batch-size 64 \
-        --mini-batch-size 4 \
-        --grad-accum-steps 16 \
-        --init-kl-coef 0.2 \
-        --target-kl 1.0 \
+        --batch-size 16 \
+        --mini-batch-size 2 \
+        --grad-accum-steps 8 \
+        --init-kl-coef 0.1 \
+        --target-kl 2.0 \
         --adaptive-kl \
         --ppo-epochs 4 \
         --max-steps 100 \
@@ -103,35 +103,26 @@ fi
 if [ "$ONLY_PPO" = false ]; then
     echo "── Step 4: GRPO G 消融实验 ──"
 
-    # G=8:  bs=4, accum=2, B_eff = 4*8*2 = 64
+    # G=8:  bs=2, accum=1, B_eff = 2*8*1 = 16
     echo "  → G=8"
     python train_grpo.py \
-        --group-size 8 --batch-size 4 --accum-steps 2 \
+        --group-size 8 --batch-size 2 --accum-steps 1 \
         --lr 2e-6 --beta 0.04 \
         --max-steps 100 \
         --save-every 10 --log-layer-grads
 
-    # G=16: bs=2, accum=2, B_eff = 2*16*2 = 64
+    # G=16: bs=1, accum=1, B_eff = 1*16*1 = 16
     echo "  → G=16"
     python train_grpo.py \
-        --group-size 16 --batch-size 2 --accum-steps 2 \
+        --group-size 16 --batch-size 1 --accum-steps 1 \
         --lr 2e-6 --beta 0.04 \
         --max-steps 100 \
         --save-every 10 --log-layer-grads
 
-    # G=32: bs=1, accum=2, B_eff = 1*32*2 = 64
+    # G=32: bs=1, accum=1, B_eff = 1*32*1 = 32
     echo "  → G=32"
     python train_grpo.py \
-        --group-size 32 --batch-size 1 --accum-steps 2 \
-        --lr 2e-6 --beta 0.04 \
-        --max-steps 100 \
-        --save-every 10 --log-layer-grads
-
-    # G=64: bs=1, accum=1, B_eff = 1*64*1 = 64
-    # (GRPO内部已实现了generation和KL的chunking，bs=1是最小安全限度)
-    echo "  → G=64"
-    python train_grpo.py \
-        --group-size 64 --batch-size 1 --accum-steps 1 \
+        --group-size 32 --batch-size 1 --accum-steps 1 \
         --lr 2e-6 --beta 0.04 \
         --max-steps 100 \
         --save-every 10 --log-layer-grads
