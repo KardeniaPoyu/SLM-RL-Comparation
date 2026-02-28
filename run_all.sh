@@ -87,7 +87,7 @@ if [ "$ONLY_GRPO" = false ]; then
         --batch-size 16 \
         --mini-batch-size 2 \
         --grad-accum-steps 8 \
-        --init-kl-coef 1.0 \
+        --init-kl-coef 0.05 \
         --adaptive-kl \
         --ppo-epochs 4 \
         --max-steps 200 \
