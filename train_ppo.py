@@ -346,7 +346,7 @@ def train(args):
             inner_m.config.use_cache = True
             
             response_tensors = []
-            gen_chunk = 8  # PPO 分块生成 (调大至 8 加速推理时间，KV cache 一般占不满 24G)
+            gen_chunk = 2  # 4090 24GB generation
             for i in range(0, len(query_tensors), gen_chunk):
                 batch_q = [q.to(ppo_trainer.accelerator.device) for q in query_tensors[i:i + gen_chunk]]
                 # 关闭 return_prompt 防止 prompt 污染模型回答，但需要 env 适应

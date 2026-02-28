@@ -85,8 +85,8 @@ if [ "$ONLY_GRPO" = false ]; then
     python train_ppo.py \
         --lr 2e-6 \
         --batch-size 16 \
-        --mini-batch-size 2 \
-        --grad-accum-steps 8 \
+        --mini-batch-size 1 \
+        --grad-accum-steps 16 \
         --init-kl-coef 0.1 \
         --target-kl 2.0 \
         --adaptive-kl \
