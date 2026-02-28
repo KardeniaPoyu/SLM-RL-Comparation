@@ -60,7 +60,8 @@ def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-7B-Instruct",
         lora_config = LoraConfig(
             r=32,
             lora_alpha=64,
-            target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+            target_modules=["q_proj", "v_proj", "k_proj", "o_proj",
+                            "gate_proj", "up_proj", "down_proj"],
             task_type="CAUSAL_LM",
             bias="none"
         )

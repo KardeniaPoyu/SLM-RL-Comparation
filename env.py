@@ -13,8 +13,12 @@ _RE_EQUATION = re.compile(r'([\d\.\s\+\-\*\/\(\)]+)=([\s\-\d\.]+)')
 
 
 class Arithmetic24Env:
-    def __init__(self):
-        pass
+    def __init__(self, simple_mode=True):
+        """
+        simple_mode=True:  二元奖励 (correct=+1, wrong=0)，RL 前期推荐
+        simple_mode=False: 复合多阶段奖励 (保留原有逻辑)，RL 后期可切换
+        """
+        self.simple_mode = simple_mode
 
     def get_prompt(self, nums_str):
         return f"""计算24点。
@@ -143,12 +147,57 @@ class Arithmetic24Env:
 
     def compute_reward(self, input_nums_str, output_text):
         """
-        复合奖励函数 (RLVR)。
-        分4个阶段：严重违规 -> 格式奖励 -> 表达式检查 -> 数学验证。
+        奖励函数。
+        simple_mode=True:  分层递进奖励，全部非负，RL 训练推荐
+        simple_mode=False: 复合多阶段奖励 (保留原有逻辑，含负奖励)
+
+        simple_mode 分层设计：
+          Tier 0 (0.0) : 垃圾输出 — 多标签 / 无表达式 / 含乱码
+          Tier 1 (0.1) : 有尝试   — 输出了 </think> + 某种表达式（但不合法）
+          Tier 2 (0.3) : 接近正确 — 使用了正确数字的合法表达式，但值≠24
+          Tier 3 (1.0) : 正确     — 表达式=24
+          Tier 4 (1.2) : 优秀     — 正确 + 有清晰推理过程
         """
         target_nums = [n.strip() for n in input_nums_str.split(',')]
         has_think_open, has_think_close, pred_expr, think_close_count, think_content = self._parse_output(output_text)
 
+        # ── 分层递进模式 (全部非负，避免 policy collapse) ──
+        if self.simple_mode:
+            # Tier 0: 垃圾输出
+            if think_close_count > 1 or not pred_expr:
+                return 0.0, False
+            if _RE_GARBAGE.search(pred_expr):
+                return 0.0, False
+
+            # 尝试验证表达式
+            is_correct, reason = self._verify_expression(pred_expr, target_nums)
+
+            if is_correct:
+                # Tier 3/4: 正确
+                reward = 1.0
+                if has_think_close and len(think_content) > 10:
+                    reward = 1.2  # Tier 4: 优秀 — 有推理过程
+                return reward, True
+            else:
+                # 区分 "接近正确" 和 "随便写的"
+                if reason == "Wrong value":
+                    # Tier 2: 使用了正确数字，合法表达式，但算出来≠24
+                    reward = 0.3
+                    if has_think_close:
+                        reward += 0.05
+                    return reward, False
+                elif reason in ("Used wrong numbers", "Invalid characters", "Exponentiation not allowed"):
+                    # Tier 1: 至少有个表达式，但数字用错了
+                    reward = 0.1
+                    if has_think_close:
+                        reward += 0.05
+                    return reward, False
+                else:
+                    # Tier 1: 数学错误 / 解析错误
+                    reward = 0.1 if has_think_close else 0.0
+                    return reward, False
+
+        # ── 复合多阶段模式 (保留原有逻辑) ──
         reward = 0.0
         is_correct = False
 
@@ -162,27 +211,22 @@ class Arithmetic24Env:
         # ── 阶段2：格式与思维链 (CoT) 奖励 ──
         if has_think_close:
             reward += 0.2
-            
-            # 防止钻空子：如果不写思考过程直接输出 </think> 就要严厉惩罚
-            # 由于 SFT 数据集中的思路本身就很简短，这里只做最基本的防空内容检测
             think_len = len(think_content)
             if think_len < 3:
-                reward -= 0.5  # 完全不写过程直接关标签，严惩
+                reward -= 0.5
             elif think_len > 10:
-                reward += 0.2  # 鼓励写几步基本的计算过程
-                
-            # ── [PRM 防御机制] 校验中间推导是否存在幻觉作弊 ──
+                reward += 0.2
             correct_steps, has_hallucination = self._evaluate_intermediate_steps(think_content)
             if has_hallucination:
-                reward -= 1.0  # ★ 严厉打击过程瞎编（如 8/13=2），避免 Reward Hacking
+                reward -= 1.0
             else:
-                reward += min(correct_steps * 0.1, 0.5)  # 鼓励踏实的中间推断（最多+0.5）
+                reward += min(correct_steps * 0.1, 0.5)
         else:
-            reward -= 0.5  # 严厉惩罚不写 </think> 的行为
+            reward -= 0.5
 
         text_len = len(output_text.strip())
         if text_len > 600:
-            reward -= 0.4  # 太啰嗦也要适度惩罚
+            reward -= 0.4
 
         # ── 阶段3：表达式初步检查 ──
         if not pred_expr:
@@ -206,9 +250,9 @@ class Arithmetic24Env:
                 reward += 0.3
         else:
             if reason in ("Math error", "Parse error", "Math error (Division by zero)", "Empty expression"):
-                reward -= 0.6  # 严厉惩罚除以零等极其离谱的数学硬伤
+                reward -= 0.6
             elif reason in ("Used wrong numbers", "Invalid characters"):
-                reward -= 0.6  # 严厉惩罚篡改数字、伪造题目的作弊行为
+                reward -= 0.6
             elif reason == "Exponentiation not allowed":
                 reward -= 0.4
             else:
@@ -218,12 +262,13 @@ class Arithmetic24Env:
 
 # ── 模块级辅助函数（ProcessPoolExecutor 需要顶层可 pickle 的函数）──
 _global_env = None
+_global_simple_mode = True
 
 def _compute_single_reward(args):
     """Worker function for parallel reward computation."""
-    global _global_env
-    if _global_env is None:
-        _global_env = Arithmetic24Env()
+    global _global_env, _global_simple_mode
+    if _global_env is None or _global_env.simple_mode != _global_simple_mode:
+        _global_env = Arithmetic24Env(simple_mode=_global_simple_mode)
     nums, resp = args
     return _global_env.compute_reward(nums, resp)
 
@@ -241,11 +286,14 @@ def _get_reward_pool():
     return _reward_pool
 
 
-def compute_rewards_parallel(nums_list, responses):
+def compute_rewards_parallel(nums_list, responses, simple_mode=True):
     """
     并行计算奖励（利用多核 CPU 加速字符串解析）。
+    simple_mode=True: 二元奖励 (correct=+1, wrong=0)，RL 前期推荐
     返回: (rewards_list, corrects_count)
     """
+    global _global_simple_mode
+    _global_simple_mode = simple_mode
     try:
         pool = _get_reward_pool()
         results = list(pool.map(_compute_single_reward,
@@ -253,7 +301,7 @@ def compute_rewards_parallel(nums_list, responses):
                                 chunksize=max(1, len(nums_list) // 8)))
     except Exception:
         # fallback 串行
-        env = Arithmetic24Env()
+        env = Arithmetic24Env(simple_mode=simple_mode)
         results = [env.compute_reward(n, r) for n, r in zip(nums_list, responses)]
 
     rewards = [r for r, _ in results]
@@ -262,25 +310,30 @@ def compute_rewards_parallel(nums_list, responses):
 
 
 if __name__ == "__main__":
-    env = Arithmetic24Env()
-    prompt = env.get_prompt("3, 3, 8, 8")
-    print("Prompt Preview:\n", prompt)
+    for mode_name, simple in [("分层递进模式 (simple)", True), ("复合模式 (complex)", False)]:
+        env = Arithmetic24Env(simple_mode=simple)
+        print(f"\n{'='*60}")
+        print(f"  {mode_name}")
+        print(f"{'='*60}")
 
-    tests = [
-        ("3, 3, 8, 8", "<think>第一步：8 / 3 = 2.66\n第二步：3 - 2.66 = 0.34\n第三步：8 / 0.34 = 24</think>\n8 / (3 - 8/3)", "[PRM]正确中间推断+全对"),
-        ("3, 3, 8, 8", "<think>假设 8 / 13 = 2. 然后...</think>\n8 / (3 - 8/3)", "[PRM作弊]瞎编公式会被严惩"),
-        ("3, 3, 8, 8", "<think>步骤</think>\n8 / (3 - 8/3)", "只有文字+正确"),
-        ("3, 3, 8, 8", "</think>\n8 / (3 - 8/3)", "仅闭合标签+正确"),
-        ("3, 3, 8, 8", "</think>\n8 * 3", "错误数字"),
-        ("3, 3, 8, 8", "</think>\n计算过程</think>\n8 / (3 - 8/3)", "多标签"),
-        ("3, 5, 8", "</think>\n(5 + 3) * 8", "N=3 错误值(=64)"),
-    ]
+        tests = [
+            # Tier 4: 正确 + 推理过程
+            ("3, 3, 8, 8", "<think>8/(3-8/3) 先算 8/3≈2.67，3-2.67=0.33，8/0.33=24</think>\n8 / (3 - 8/3)", "Tier4: 正确+推理"),
+            # Tier 3: 正确但没推理
+            ("3, 3, 8, 8", "</think>\n8 / (3 - 8/3)", "Tier3: 正确无推理"),
+            # Tier 2: 正确数字但值≠24
+            ("3, 3, 8, 8", "</think>\n3 + 3 + 8 + 8", "Tier2: 对数字错值"),
+            # Tier 1: 用错数字
+            ("3, 3, 8, 8", "</think>\n8 * 3", "Tier1: 错数字"),
+            # Tier 0: 垃圾
+            ("3, 3, 8, 8", "</think>\n计算</think>\n8/(3-8/3)", "Tier0: 多标签"),
+            ("3, 3, 8, 8", "没有任何格式", "Tier0: 无表达式"),
+        ]
 
-    print("\n" + "=" * 60)
-    for nums, output, desc in tests:
-        r, c = env.compute_reward(nums, output)
-        status = "✅" if c else "❌"
-        print(f"  {status} {desc:30s} → reward={r:+.2f}, correct={c}")
+        for nums, output, desc in tests:
+            r, c = env.compute_reward(nums, output)
+            status = "✅" if c else "❌"
+            print(f"  {status} {desc:20s} → reward={r:+.2f}, correct={c}")
 
     # 速度基准测试
     import time

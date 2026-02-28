@@ -59,8 +59,8 @@ echo ""
 # Step 1: 数据生成
 # ========================================
 if [ "$SKIP_DATA" = false ]; then
-    echo "── Step 1: 数据生成 (N=3,4,5) ──"
-    python data_gen_multi.py --n 3 4 5 --sft --sft-per-n 200
+    echo "── Step 1: 数据生成 (N=4, 经典24点) ──"
+    python data_gen_multi.py --n 4 --sft --sft-per-n 500
     echo ""
 fi
 
@@ -84,13 +84,14 @@ if [ "$ONLY_GRPO" = false ]; then
     echo "── Step 3: PPO 训练 ──"
     python train_ppo.py \
         --lr 2e-6 \
-        --batch-size 16 \
-        --mini-batch-size 2 \
-        --grad-accum-steps 8 \
+        --batch-size 64 \
+        --mini-batch-size 4 \
+        --grad-accum-steps 16 \
         --init-kl-coef 0.2 \
+        --target-kl 1.0 \
         --adaptive-kl \
         --ppo-epochs 4 \
-        --max-steps 200 \
+        --max-steps 100 \
         --save-every 10 \
         --log-layer-grads
     echo ""
@@ -107,7 +108,7 @@ if [ "$ONLY_PPO" = false ]; then
     python train_grpo.py \
         --group-size 8 --batch-size 4 --accum-steps 2 \
         --lr 2e-6 --beta 0.04 \
-        --max-steps 200 \
+        --max-steps 100 \
         --save-every 10 --log-layer-grads
 
     # G=16: bs=2, accum=2, B_eff = 2*16*2 = 64
@@ -115,7 +116,7 @@ if [ "$ONLY_PPO" = false ]; then
     python train_grpo.py \
         --group-size 16 --batch-size 2 --accum-steps 2 \
         --lr 2e-6 --beta 0.04 \
-        --max-steps 200 \
+        --max-steps 100 \
         --save-every 10 --log-layer-grads
 
     # G=32: bs=1, accum=2, B_eff = 1*32*2 = 64
@@ -123,7 +124,7 @@ if [ "$ONLY_PPO" = false ]; then
     python train_grpo.py \
         --group-size 32 --batch-size 1 --accum-steps 2 \
         --lr 2e-6 --beta 0.04 \
-        --max-steps 200 \
+        --max-steps 100 \
         --save-every 10 --log-layer-grads
 
     # G=64: bs=1, accum=1, B_eff = 1*64*1 = 64
@@ -132,7 +133,7 @@ if [ "$ONLY_PPO" = false ]; then
     python train_grpo.py \
         --group-size 64 --batch-size 1 --accum-steps 1 \
         --lr 2e-6 --beta 0.04 \
-        --max-steps 200 \
+        --max-steps 100 \
         --save-every 10 --log-layer-grads
 
     echo ""

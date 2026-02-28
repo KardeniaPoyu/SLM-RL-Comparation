@@ -339,6 +339,7 @@ def train(args):
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
                         mini_bs = min(32, input_ids.shape[0])  # 4090 24GB 可加大 mini-batch
                         lp_list = []
+                        entropy_list = []
                         for mi in range(0, input_ids.shape[0], mini_bs):
                             mb_ids = input_ids[mi:mi + mini_bs]
                             mb_mask = attention_mask[mi:mi + mini_bs]
@@ -346,13 +347,21 @@ def train(args):
                             mb_loss_mask = (mb_resp != tokenizer.pad_token_id).float()
 
                             logits = model(mb_ids, attention_mask=mb_mask).logits
+                            resp_logits = logits[:, q_len_r-1:-1, :]
                             mb_lp = get_per_token_logps(logits[:, q_len_r-1:-1, :], mb_resp)
                             mb_lp = mb_lp * mb_loss_mask
                             lp_list.append(mb_lp)
-                            del logits
+
+                            # 正确的 entropy 计算：对完整词表分布求和
+                            log_softmax = F.log_softmax(resp_logits, dim=-1)
+                            softmax = torch.exp(log_softmax)
+                            mb_ent = -(softmax * log_softmax).sum(dim=-1)  # [batch, seq_len]
+                            mb_ent = (mb_ent * mb_loss_mask).sum(dim=1) / mb_loss_mask.sum(dim=1).clamp(min=1)
+                            entropy_list.append(mb_ent)
+                            del logits, resp_logits, log_softmax, softmax
 
                         log_probs = torch.cat(lp_list, dim=0)
-
+                        entropy = torch.cat(entropy_list, dim=0)  # [G]
                     loss_mask = (resp_tensors_r != tokenizer.pad_token_id).float()
                     ratio = torch.exp(log_probs - r["old_log_probs"])
                     kl = torch.exp(r["ref_log_probs"] - log_probs) - (r["ref_log_probs"] - log_probs) - 1
@@ -364,8 +373,7 @@ def train(args):
                     loss = ((policy_loss + beta * kl) * loss_mask).sum(dim=1) / loss_mask.sum(dim=1).clamp(min=1)
                     loss = loss.mean()
 
-                    prob = torch.exp(log_probs)
-                    entropy = -(prob * log_probs * loss_mask).sum(dim=1) / loss_mask.sum(dim=1).clamp(min=1)
+                    # entropy 已在上方从 logits 正确计算
 
                     loss = loss / accum
                     entropy_bonus = args.entropy_coef * entropy.mean() / accum

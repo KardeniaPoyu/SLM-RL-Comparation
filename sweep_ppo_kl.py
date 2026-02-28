@@ -141,15 +141,14 @@ def run_one_config(name, init_kl_coef, adaptive, target_kl, kl_penalty,
         if step >= N_UPDATES:
             break
 
-        query_tensors = [q.squeeze(0) for q in batch["input_ids"]]
+        query_tensors = batch["query"]
         with torch.no_grad():
             response_tensors = ppo_trainer.generate(
-                query_tensors, batch_size=4, **gen_kwargs
+                query_tensors, return_prompt=False, batch_size=4, **gen_kwargs
             )
 
         responses = tokenizer.batch_decode(
-            [r[len(q):] for q, r in zip(query_tensors, response_tensors)],
-            skip_special_tokens=True
+            response_tensors, skip_special_tokens=True
         )
         input_nums_list = batch["input_nums"]
         all_rewards, correct_count = [], 0

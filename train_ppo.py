@@ -131,7 +131,7 @@ def parse_args():
     parser.add_argument("--init-kl-coef", type=float, default=0.05,
                         help="KL 惩罚系数 (适度放开以供探索)")
     parser.add_argument("--clip-range", type=float, default=0.2, help="PPO clip range")
-    parser.add_argument("--target-kl", type=float, default=0.05, help="自适应 KL 目标值 (适度放开)")
+    parser.add_argument("--target-kl", type=float, default=1.0, help="自适应 KL 目标值 (适度放开)")
     parser.add_argument("--ppo-epochs", type=int, default=4, help="PPO 更新轮数 (提高样本利用率)")
 
     # ── 训练控制 ──
@@ -243,7 +243,7 @@ def train(args):
         batch_size=args.batch_size,
         mini_batch_size=args.mini_batch_size,
         gradient_accumulation_steps=args.grad_accum_steps,
-        target_kl=1.0,  # 自适应 KL 目标：允许探索到 KL≈1 后开始加大惩罚
+        target_kl=args.target_kl,  # 使用命令行参数，不再硬编码
         seed=42,
         ppo_epochs=args.ppo_epochs,
         init_kl_coef=args.init_kl_coef,
