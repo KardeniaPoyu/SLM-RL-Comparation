@@ -135,7 +135,7 @@ def parse_args():
     parser.add_argument("--ppo-epochs", type=int, default=2, help="PPO 更新轮数 (提高样本利用率)")
 
     # ── 训练控制 ──
-    parser.add_argument("--max-new-tokens", type=int, default=128, help="生成最大长度 (24点答案通常<80 tokens)")
+    parser.add_argument("--max-new-tokens", type=int, default=512, help="生成最大长度 (需容纳 Long-CoT 的长思考过程)")
     parser.add_argument("--save-every", type=int, default=10)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--max-steps", type=int, default=200, help="最多更新的 step 数量，到达则停止训练并保存模型")
@@ -249,7 +249,7 @@ def train(args):
         init_kl_coef=args.init_kl_coef,
         adap_kl_ctrl=args.adaptive_kl,
         cliprange=args.clip_range,
-        max_grad_norm=1.5,             # 放宽梯度裁剪，允许模型大幅跳跃学习
+        max_grad_norm=0.5,             # 缩紧梯度裁剪，防止大爆炸
         kl_penalty="abs"  # 用 |logp - ref_logp| 防止负 KL 被利用
     )
 
