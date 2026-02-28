@@ -274,7 +274,7 @@ def train(args):
 
                 group_rewards = torch.tensor(group_rewards_list, dtype=torch.float32).to(device, non_blocking=True)
                 mean_r = group_rewards.mean()
-                std_r = group_rewards.std() + 1e-8
+                std_r = group_rewards.std() + 1e-4  # 增大平滑项，防止极寒环境下的优势爆炸
                 advantages = (group_rewards - mean_r) / std_r
 
                 input_ids = group_out
@@ -378,12 +378,12 @@ def train(args):
                     mean_kl_item = seq_kl.mean().item()
                     total_kl += mean_kl_item
 
-                    # 自适应 KL
-                    if args.adaptive_kl:
-                        if mean_kl_item > args.kl_high:
-                            beta = min(beta * 1.5, 0.2)
-                        elif mean_kl_item < args.kl_low:
-                            beta = max(beta / 1.5, 0.001)
+                    # 自适应 KL (已注释，强制固定 beta 防止约束失效)
+                    # if args.adaptive_kl:
+                    #     if mean_kl_item > args.kl_high:
+                    #         beta = min(beta * 1.5, 0.2)
+                    #     elif mean_kl_item < args.kl_low:
+                    #         beta = max(beta / 1.5, 0.001)
 
             step += 1
 

@@ -243,14 +243,14 @@ def train(args):
         batch_size=args.batch_size,
         mini_batch_size=args.mini_batch_size,
         gradient_accumulation_steps=args.grad_accum_steps,
-        target_kl=args.target_kl,
+        target_kl=0.1,  # 允许更宽松的目标 KL，否则惩罚系数会失控爆炸
         seed=42,
         ppo_epochs=args.ppo_epochs,
         init_kl_coef=args.init_kl_coef,
         adap_kl_ctrl=args.adaptive_kl,
         cliprange=args.clip_range,
-        max_grad_norm=0.5,             # 缩紧梯度裁剪，防止大爆炸
-        kl_penalty="abs"  # 用 |logp - ref_logp| 防止负 KL 被利用
+        max_grad_norm=0.5,
+        kl_penalty="kl",  # 恢复默认的 KL 惩罚，不要用 abs，以避免数值失控
     )
 
     dataset = MathDataset(args.data_file, tokenizer, env, max_samples=args.max_samples)
