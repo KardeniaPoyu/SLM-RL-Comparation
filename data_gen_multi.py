@@ -223,7 +223,7 @@ def _get_random_failed_paths(digits, target_expr):
         
     return paths
 
-def generate_cot_from_expr(expr_str):
+def generate_cot_from_expr(expr_str, provided_digits=None):
     """
     生成状态追踪(State-Tracking)风格的 Long-CoT。
     强制模型输出带有回溯的严谨深度优先搜索格式。
@@ -231,7 +231,11 @@ def generate_cot_from_expr(expr_str):
     clean = _simplify_expr(expr_str)
     
     # 获取此题目的所有使用到的数字
-    original_digits = re.findall(r'\d+', clean)
+    if provided_digits is not None:
+        original_digits = provided_digits
+    else:
+        original_digits = re.findall(r'\d+', clean)
+        
     nums_str = ", ".join(original_digits)
     
     cot_parts = []
@@ -395,7 +399,7 @@ def main():
                     continue
 
                 clean_expr = _simplify_expr(expr)
-                cot_text = generate_cot_from_expr(expr)
+                cot_text = generate_cot_from_expr(expr, provided_digits=[str(c) for c in comb])
 
                 nums_str = ", ".join(map(str, comb))
                 # 与 env.py get_prompt() 格式保持一致
