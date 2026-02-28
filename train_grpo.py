@@ -77,7 +77,7 @@ def parse_args():
 
     # ── 优化器 ──
     parser.add_argument("--lr", type=float, default=2e-6, help="学习率 (提高)")
-    parser.add_argument("--beta", type=float, default=0.04, help="KL 惩罚系数")
+    parser.add_argument("--beta", type=float, default=0.01, help="KL 惩罚系数 (初始适度放开)")
     parser.add_argument("--clip-eps", type=float, default=0.2, help="PPO clip 范围")
     parser.add_argument("--max-grad-norm", type=float, default=0.5, help="梯度裁剪，缩紧以防止爆炸")
     parser.add_argument("--entropy-coef", type=float, default=0.005, help="Entropy bonus 系数")
@@ -107,7 +107,7 @@ def parse_args():
     # ── 自适应 KL ──
     parser.add_argument("--adaptive-kl", action="store_true", default=True,
                         help="启用自适应 KL 惩罚 (默认开启)")
-    parser.add_argument("--kl-high", type=float, default=6.0, help="KL 上界阈值")
+    parser.add_argument("--kl-high", type=float, default=4.0, help="KL 上界阈值 (适度放开以允许探索)")
     parser.add_argument("--kl-low", type=float, default=1.0, help="KL 下界阈值")
 
     return parser.parse_args()
