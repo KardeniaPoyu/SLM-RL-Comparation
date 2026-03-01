@@ -119,16 +119,17 @@ if [ "$ONLY_PPO" = false ]; then
         --max-steps 100 \
         --save-every 10 --log-layer-grads
 
-    # G=32: bs=1, accum=1, B_eff = 1*32*1 = 32
-    echo "  → G=32"
+    # G=4:  bs=4, accum=1, B_eff = 4*4*1 = 16
+    echo "  → G=4"
     python train_grpo.py \
-        --group-size 32 --batch-size 1 --accum-steps 1 \
-        --lr 2e-6 --beta 0.04 \
+        --group-size 4 --batch-size 4 --accum-steps 1 \
+        --lr 5e-7 --beta 0.02 \
         --max-steps 100 \
         --save-every 10 --log-layer-grads
 
     echo ""
 fi
+
 
 # ========================================
 # Step 5: 最终评估 (测试集上的泛化表现)
