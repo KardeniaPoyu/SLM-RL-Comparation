@@ -161,25 +161,41 @@ class Arithmetic24Env:
         target_nums = [n.strip() for n in input_nums_str.split(',')]
         has_think_open, has_think_close, pred_expr, think_close_count, think_content = self._parse_output(output_text)
 
-        # ── 分层递进模式 (严格结果导向，避免 GRPO Reward Hacking) ──
+        # ── 分层递进模式 (全部非负，避免 policy collapse) ──
         if self.simple_mode:
-            # 严格结果导向：非黑即白
-            if think_close_count != 1 or not pred_expr:
+            # Tier 0: 垃圾输出
+            if think_close_count > 1 or not pred_expr:
                 return 0.0, False
-            
+            if _RE_GARBAGE.search(pred_expr):
+                return 0.0, False
+
+            # 尝试验证表达式
             is_correct, reason = self._verify_expression(pred_expr, target_nums)
 
             if is_correct:
-                # 只有真正算对，才给奖励
-                reward = 1.0 
-                # 如果内部还有良好的思考过程长度，给一点额外奖励
-                if len(think_content) > 10:
-                    reward = 1.2
+                # Tier 3/4: 正确
+                reward = 1.0
+                if has_think_close and len(think_content) > 10:
+                    reward = 1.2  # Tier 4: 优秀 — 有推理过程
                 return reward, True
             else:
-                # 不管是格式错，还是算错了，全都是 0 分。
-                # 绝对不要为“瞎编了一个表达式”给哪怕 0.1 的残疾分。
-                return 0.0, False
+                # 区分 "接近正确" 和 "随便写的"
+                if reason == "Wrong value":
+                    # Tier 2: 使用了正确数字，合法表达式，但算出来≠24
+                    reward = 0.3
+                    if has_think_close:
+                        reward += 0.05
+                    return reward, False
+                elif reason in ("Used wrong numbers", "Invalid characters", "Exponentiation not allowed"):
+                    # Tier 1: 至少有个表达式，但数字用错了
+                    reward = 0.1
+                    if has_think_close:
+                        reward += 0.05
+                    return reward, False
+                else:
+                    # Tier 1: 数学错误 / 解析错误
+                    reward = 0.1 if has_think_close else 0.0
+                    return reward, False
 
         # ── 复合多阶段模式 (保留原有逻辑) ──
         reward = 0.0
