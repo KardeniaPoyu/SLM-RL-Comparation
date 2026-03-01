@@ -231,7 +231,7 @@ def train(args):
 
             # 分块生成防 OOM
             with torch.no_grad():
-                gen_chunk = 64  # 4090 24GB 可加大并发生成数
+                gen_chunk = 16  # 减小 chunk 避免 7B 长序列 OOM
                 all_outputs = []
                 for ci in range(0, huge_q_tensors.shape[0], gen_chunk):
                     chunk = huge_q_tensors[ci:ci + gen_chunk]
@@ -282,7 +282,7 @@ def train(args):
 
                 with torch.no_grad():
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        mini_bs = min(32, G)  # 4090 24GB 可加大 mini-batch
+                        mini_bs = min(8, G)  # 减小评估用的 mini_bs 以防 OOM
                         old_log_probs_list, ref_log_probs_list = [], []
 
                         for mi in range(0, G, mini_bs):
@@ -335,63 +335,57 @@ def train(args):
                     q_len_r = r["q_len"]
                     resp_tensors_r = r["resp_tensors"]
                     adv = r["advantages"].unsqueeze(1)
+                    old_log_probs_r = r["old_log_probs"]
+                    ref_log_probs_r = r["ref_log_probs"]
+                    G_size = input_ids.shape[0]
 
-                    with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        mini_bs = min(32, input_ids.shape[0])  # 4090 24GB 可加大 mini-batch
-                        lp_list = []
-                        entropy_list = []
-                        for mi in range(0, input_ids.shape[0], mini_bs):
-                            mb_ids = input_ids[mi:mi + mini_bs]
-                            mb_mask = attention_mask[mi:mi + mini_bs]
-                            mb_resp = resp_tensors_r[mi:mi + mini_bs]
-                            mb_loss_mask = (mb_resp != tokenizer.pad_token_id).float()
+                    # 降低 mini_bs 并做 per-minibatch backward 防止 OOM
+                    mini_bs = 2  
+                    for mi in range(0, G_size, mini_bs):
+                        mb_ids = input_ids[mi:mi + mini_bs]
+                        mb_mask = attention_mask[mi:mi + mini_bs]
+                        mb_resp = resp_tensors_r[mi:mi + mini_bs]
+                        mb_adv = adv[mi:mi + mini_bs]
+                        mb_old_lp = old_log_probs_r[mi:mi + mini_bs]
+                        mb_ref_lp = ref_log_probs_r[mi:mi + mini_bs]
+                        mb_loss_mask = (mb_resp != tokenizer.pad_token_id).float()
 
+                        with torch.autocast(device_type="cuda", dtype=torch.float16):
                             logits = model(mb_ids, attention_mask=mb_mask).logits
                             resp_logits = logits[:, q_len_r-1:-1, :]
-                            mb_lp = get_per_token_logps(logits[:, q_len_r-1:-1, :], mb_resp)
+                            
+                            # 直接计算 log_softmax 避免重复分配显存
+                            log_softmax = F.log_softmax(resp_logits, dim=-1)
+                            mb_lp = torch.gather(log_softmax, 2, mb_resp.unsqueeze(-1)).squeeze(-1)
                             mb_lp = mb_lp * mb_loss_mask
-                            lp_list.append(mb_lp)
 
                             # 正确的 entropy 计算：对完整词表分布求和
-                            log_softmax = F.log_softmax(resp_logits, dim=-1)
                             softmax = torch.exp(log_softmax)
                             mb_ent = -(softmax * log_softmax).sum(dim=-1)  # [batch, seq_len]
                             mb_ent = (mb_ent * mb_loss_mask).sum(dim=1) / mb_loss_mask.sum(dim=1).clamp(min=1)
-                            entropy_list.append(mb_ent)
-                            del logits, resp_logits, log_softmax, softmax
 
-                        log_probs = torch.cat(lp_list, dim=0)
-                        entropy = torch.cat(entropy_list, dim=0)  # [G]
-                    loss_mask = (resp_tensors_r != tokenizer.pad_token_id).float()
-                    ratio = torch.exp(log_probs - r["old_log_probs"])
-                    kl = torch.exp(r["ref_log_probs"] - log_probs) - (r["ref_log_probs"] - log_probs) - 1
+                            ratio = torch.exp(mb_lp - mb_old_lp)
+                            kl = torch.exp(mb_ref_lp - mb_lp) - (mb_ref_lp - mb_lp) - 1
 
-                    surr1 = ratio * adv
-                    surr2 = torch.clamp(ratio, 1.0 - args.clip_eps, 1.0 + args.clip_eps) * adv
-                    policy_loss = -torch.min(surr1, surr2)
+                            surr1 = ratio * mb_adv
+                            surr2 = torch.clamp(ratio, 1.0 - args.clip_eps, 1.0 + args.clip_eps) * mb_adv
+                            policy_loss = -torch.min(surr1, surr2)
 
-                    loss = ((policy_loss + beta * kl) * loss_mask).sum(dim=1) / loss_mask.sum(dim=1).clamp(min=1)
-                    loss = loss.mean()
+                            mb_loss = ((policy_loss + beta * kl) * mb_loss_mask).sum(dim=1) / mb_loss_mask.sum(dim=1).clamp(min=1)
+                            
+                            loss_for_backward = mb_loss.sum() / G_size / accum
+                            entropy_bonus = args.entropy_coef * mb_ent.sum() / G_size / accum
+                            loss_for_backward = loss_for_backward - entropy_bonus
 
-                    # entropy 已在上方从 logits 正确计算
+                        # 将反向传播移动到小批量内部，立即释放计算图
+                        loss_for_backward.backward()
 
-                    loss = loss / accum
-                    entropy_bonus = args.entropy_coef * entropy.mean() / accum
-                    loss = loss - entropy_bonus
-                    loss.backward()
+                        total_entropy += (mb_ent.sum().item() / G_size)
 
-                    total_entropy += entropy.mean().item()
+                        seq_kl = (kl * mb_loss_mask).sum(dim=1) / mb_loss_mask.sum(dim=1).clamp(min=1)
+                        total_kl += (seq_kl.sum().item() / G_size)
 
-                    seq_kl = (kl * loss_mask).sum(dim=1) / loss_mask.sum(dim=1).clamp(min=1)
-                    mean_kl_item = seq_kl.mean().item()
-                    total_kl += mean_kl_item
-
-                    # 自适应 KL (已注释，强制固定 beta 防止约束失效)
-                    # if args.adaptive_kl:
-                    #     if mean_kl_item > args.kl_high:
-                    #         beta = min(beta * 1.5, 0.2)
-                    #     elif mean_kl_item < args.kl_low:
-                    #         beta = max(beta / 1.5, 0.001)
+                        del logits, resp_logits, log_softmax, softmax, loss_for_backward, mb_loss, policy_loss, surr1, surr2, kl, ratio, mb_lp, mb_ent
 
             step += 1
 
