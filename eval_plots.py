@@ -66,16 +66,6 @@ def load_and_process(filepath, smooth_alpha=0.2):
     # PPO的KL在csv中叫 kl_ref，统一重命名为 kl_div 以便作图对齐
     if 'kl_ref' in df.columns and 'kl_div' not in df.columns:
         df = df.rename(columns={'kl_ref': 'kl_div'})
-        
-    # [补全 PPO 缺失数据]: 如果是 PPO 且最高 step < 100，用最后一条记录向后平推到 100
-    if 'kl_div' in df.columns and 'step' in df.columns:
-        max_step = df['step'].max()
-        if max_step > 0 and max_step < 100:
-            last_row = df.iloc[-1:].copy()
-            missing_steps = range(int(max_step) + 1, 101)
-            extrapolated = pd.concat([last_row] * len(missing_steps), ignore_index=True)
-            extrapolated['step'] = missing_steps
-            df = pd.concat([df, extrapolated], ignore_index=True)
 
     # 对所有数值列计算 EMA 平滑
     for col in df.select_dtypes(include=[np.number]).columns:
