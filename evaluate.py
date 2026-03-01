@@ -90,7 +90,7 @@ def load_test_data(data_file, n_filter=None, max_samples=None):
     return samples
 
 
-def evaluate_model(model, tokenizer, env, test_samples, max_new_tokens=128,
+def evaluate_model(model, tokenizer, env, test_samples, max_new_tokens=512,
                    temperature=0.7, top_p=0.95, batch_size=16):
     """
     在测试集上做推理，返回成功率和详细结果。
@@ -176,6 +176,8 @@ def main():
                         help="每个难度的测试题数 (默认: 100)")
     parser.add_argument("--batch-size", type=int, default=16,
                         help="推理 batch size")
+    parser.add_argument("--max-new-tokens", type=int, default=512,
+                        help="生成最大长度 (需容纳 Long-CoT 的思考过程)")
     parser.add_argument("--temperature", type=float, default=0.7,
                         help="生成温度 (评估用较低值)")
     parser.add_argument("--output-dir", type=str, default="logs")
@@ -244,6 +246,7 @@ def main():
 
             success_rate, results = evaluate_model(
                 model, tokenizer, env, samples,
+                max_new_tokens=args.max_new_tokens,
                 batch_size=args.batch_size,
                 temperature=args.temperature
             )
