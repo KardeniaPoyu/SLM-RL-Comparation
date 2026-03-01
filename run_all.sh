@@ -83,14 +83,14 @@ fi
 if [ "$ONLY_GRPO" = false ]; then
     echo "── Step 3: PPO 训练 ──"
     python train_ppo.py \
-        --lr 5e-7 \
+        --lr 2e-6 \
         --batch-size 16 \
         --mini-batch-size 1 \
         --grad-accum-steps 16 \
         --init-kl-coef 0.1 \
         --target-kl 2.0 \
         --adaptive-kl \
-        --ppo-epochs 1 \
+        --ppo-epochs 4 \
         --max-steps 100 \
         --save-every 10 \
         --log-layer-grads
@@ -107,7 +107,7 @@ if [ "$ONLY_PPO" = false ]; then
     echo "  → G=8"
     python train_grpo.py \
         --group-size 8 --batch-size 2 --accum-steps 1 \
-        --lr 5e-7 --beta 0.02 \
+        --lr 2e-6 --beta 0.04 \
         --max-steps 100 \
         --save-every 10 --log-layer-grads
 
@@ -115,7 +115,7 @@ if [ "$ONLY_PPO" = false ]; then
     echo "  → G=16"
     python train_grpo.py \
         --group-size 16 --batch-size 1 --accum-steps 1 \
-        --lr 5e-7 --beta 0.02 \
+        --lr 2e-6 --beta 0.04 \
         --max-steps 100 \
         --save-every 10 --log-layer-grads
 
@@ -123,7 +123,7 @@ if [ "$ONLY_PPO" = false ]; then
     echo "  → G=32"
     python train_grpo.py \
         --group-size 32 --batch-size 1 --accum-steps 1 \
-        --lr 5e-7 --beta 0.02 \
+        --lr 2e-6 --beta 0.04 \
         --max-steps 100 \
         --save-every 10 --log-layer-grads
 
