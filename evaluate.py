@@ -135,7 +135,7 @@ def evaluate_model(model, tokenizer, env, test_samples, max_new_tokens=512,
                 correct += 1
             results.append({
                 "nums": nums,
-                "response": resp[:200],  # 截断过长的输出
+                "response": resp,  # 取消人为截断，保留完整输出
                 "correct": is_correct,
                 "reward": reward
             })
@@ -150,20 +150,18 @@ def evaluate_model(model, tokenizer, env, test_samples, max_new_tokens=512,
 
 
 def find_model_dirs(base_dir="saved_models"):
-    """自动发现所有 *_final 模型目录"""
+    """自动发现所有 *_final 模型目录，包括多 Seed 嵌套结构"""
     dirs = []
-    patterns = [
-        os.path.join(base_dir, "ppo_final"),
-        os.path.join(base_dir, "sft_final"),
-    ]
-    # GRPO 消融模型
-    patterns += glob.glob(os.path.join(base_dir, "grpo_G*_final"))
+    
+    # 支持类似 saved_models/seed_1/ppo_final 这种结构
+    # 或者老式的 saved_models/ppo_final
+    for root, _, files in os.walk(base_dir):
+        if 'adapter_model.safetensors' in files or 'pytorch_model.bin' in files:
+            # 说明这是一个模型目录
+            if root.endswith('_final'):
+                dirs.append(root)
 
-    for d in patterns:
-        if os.path.isdir(d):
-            dirs.append(d)
-
-    return sorted(dirs)
+    return sorted(list(set(dirs)))
 
 
 def main():
@@ -172,11 +170,11 @@ def main():
                         help="要评估的模型路径 (默认: 自动发现所有 *_final 模型)")
     parser.add_argument("--test-file", type=str, default="data/test.csv",
                         help="测试数据路径")
-    parser.add_argument("--n-samples", type=int, default=100,
-                        help="每个难度的测试题数 (默认: 100)")
+    parser.add_argument("--n-samples", type=int, default=500,
+                        help="每个难度的测试题数 (默认提升至: 500，充分评估)")
     parser.add_argument("--batch-size", type=int, default=16,
                         help="推理 batch size")
-    parser.add_argument("--max-new-tokens", type=int, default=512,
+    parser.add_argument("--max-new-tokens", type=int, default=1024,
                         help="生成最大长度 (需容纳 Long-CoT 的思考过程)")
     parser.add_argument("--temperature", type=float, default=0.7,
                         help="生成温度 (评估用较低值)")
@@ -224,9 +222,19 @@ def main():
     summary = []
 
     for model_dir in model_dirs:
-        model_name = os.path.basename(model_dir)
+        # 尝试提取 seed 信息，例如 saved_models/seed_1/ppo_final -> model_name = ppo_final_seed_1
+        dir_parts = os.path.normpath(model_dir).split(os.sep)
+        base_name = dir_parts[-1]
+        seed_name = ""
+        for part in dir_parts:
+            if part.startswith("seed_"):
+                seed_name = "_" + part
+                break
+                
+        model_name = base_name + seed_name
+        
         print(f"\n{'='*60}")
-        print(f"  评估模型: {model_name}")
+        print(f"  评估模型: {model_name} (Dir: {model_dir})")
         print(f"{'='*60}")
 
         try:
