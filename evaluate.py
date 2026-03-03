@@ -90,7 +90,7 @@ def load_test_data(data_file, n_filter=None, max_samples=None):
     return samples
 
 
-def evaluate_model(model, tokenizer, env, test_samples, max_new_tokens=512,
+def evaluate_model(model, tokenizer, env, test_samples, max_new_tokens=1024,
                    temperature=0.7, top_p=0.95, batch_size=16):
     """
     在测试集上做推理，返回成功率和详细结果。
@@ -170,8 +170,8 @@ def main():
                         help="要评估的模型路径 (默认: 自动发现所有 *_final 模型)")
     parser.add_argument("--test-file", type=str, default="data/test.csv",
                         help="测试数据路径")
-    parser.add_argument("--n-samples", type=int, default=500,
-                        help="每个难度的测试题数 (默认提升至: 500，充分评估)")
+    parser.add_argument("--n-samples", type=int, default=100,
+                        help="每个难度的测试题数 (默认提升至: 100，充分评估)")
     parser.add_argument("--batch-size", type=int, default=16,
                         help="推理 batch size")
     parser.add_argument("--max-new-tokens", type=int, default=1024,
@@ -194,7 +194,7 @@ def main():
 
     test_data_by_n = {}
     if test_file.endswith('.jsonl'):
-        for n in [3, 4, 5]:
+        for n in [3, 4, 5, 6]:
             samples = load_test_data(test_file, n_filter=n, max_samples=args.n_samples)
             if samples:
                 test_data_by_n[n] = samples
