@@ -141,10 +141,9 @@ DIFFICULTY_MAP = {
 NUM_RANGE = range(1, 14)  # 1~13
 
 
-def enumerate_valid_combinations(n, max_count=None):
+def enumerate_valid_combinations_exact(n, max_count=None):
     """
-    枚举所有可重复组合 C(13+n-1, n) 中能算出 24 的组合。
-    返回 list of tuple。
+    穷举枚举组合能算出 24 的组合。适合 N<=5。
     """
     valid = []
     total_checked = 0
@@ -160,8 +159,47 @@ def enumerate_valid_combinations(n, max_count=None):
                 print(f"  [N={n}] 达到上限 {max_count}，停止枚举。")
                 break
 
-    print(f"  [N={n}] 完成：共检查 {total_checked} 个，有效 {len(valid)} 个")
+    print(f"  [N={n}] 穷举完成：共检查 {total_checked} 个，有效 {len(valid)} 个")
     return valid
+
+def enumerate_valid_combinations_sampled(n, max_count=1000):
+    """
+    拒绝采样（Rejection Sampling），适合 N>=6，避免枚举空间爆炸。
+    随机生成 n 个数字的组合，验证是否等于 24，直到收集满 max_count。
+    """
+    valid = set()
+    total_checked = 0
+
+    print(f"  [N={n}] 使用拒绝采样快速生成数据，目标数量: {max_count} ...")
+    
+    # 为了避免死循环，设置最大尝试次数
+    max_attempts = max_count * 500 
+    
+    while len(valid) < max_count and total_checked < max_attempts:
+        total_checked += 1
+        
+        # 随机组合需要排序后放入 set 去重
+        comb = tuple(sorted(random.choices(NUM_RANGE, k=n)))
+        
+        if comb in valid:
+            continue
+            
+        if can_make_24([Fraction(x) for x in comb]):
+            valid.add(comb)
+            if len(valid) % 100 == 0:
+                print(f"  [N={n}] 已采到 {len(valid)} / {max_count} 个有效组合...")
+
+    print(f"  [N={n}] 采样完成：尝试 {total_checked} 次，有效 {len(valid)} 个")
+    return list(valid)
+
+def get_valid_combinations(n, max_count=None):
+    if n >= 6:
+        # N=6 穷举空间极大 (C(18,6)=18564)，虽然在可接受边缘，但递归解法会非常慢。
+        # 因此 N>=6 固定使用拒绝采样，快速保底获取测试集。
+        target_count = max_count if max_count else 2000
+        return enumerate_valid_combinations_sampled(n, max_count=target_count)
+    else:
+        return enumerate_valid_combinations_exact(n, max_count=max_count)
 
 
 def _get_random_failed_paths(digits, target_expr):
@@ -322,18 +360,18 @@ def generate_cot_from_expr(expr_str, provided_digits=None):
 
 def main():
     parser = argparse.ArgumentParser(description="多难度24点数据生成器")
-    parser.add_argument("--n", nargs='+', type=int, default=[3, 4, 5],
-                        help="要生成的 N 值列表（默认: 3 4 5，N=6 求解极慢已移除）")
-    parser.add_argument("--max-per-n", type=int, default=None,
-                        help="每个 N 最多生成多少条（默认: 不限制）")
+    parser.add_argument("--n", nargs='+', type=int, default=[3, 4, 5, 6],
+                        help="要生成的 N 值列表（默认: 3 4 5 6）")
+    parser.add_argument("--max-per-n", type=int, default=3000,
+                        help="每个 N 最多生成多少条（默认: 3000 测试集极大化）")
     parser.add_argument("--sft", action="store_true",
                         help="同时生成 SFT 训练数据（含 CoT 推理轨迹）")
     parser.add_argument("--sft-per-n", type=int, default=200,
                         help="每个 N 生成的 SFT 样本数（默认: 200）")
     parser.add_argument("--seed", type=int, default=42,
                         help="随机种子（默认: 42）")
-    parser.add_argument("--split-ratio", type=float, default=0.9,
-                        help="训练集占比（默认: 0.9）")
+    parser.add_argument("--test-size", type=int, default=500,
+                        help="强制划分为测试集的数量（默认: 每个难度 500 道）")
     parser.add_argument("--output-dir", type=str, default="data",
                         help="输出目录（默认: data）")
     args = parser.parse_args()
@@ -351,16 +389,23 @@ def main():
         print(f"生成 N={n} ({DIFFICULTY_MAP.get(n, 'unknown')}) 的数据...")
         print(f"{'='*60}")
 
-        valid = enumerate_valid_combinations(n, max_count=args.max_per_n)
+        valid = get_valid_combinations(n, max_count=args.max_per_n)
 
         if not valid:
             print(f"  ⚠️ N={n} 没有找到任何有效组合！")
             continue
 
         random.shuffle(valid)
-        split_idx = int(len(valid) * args.split_ratio)
-        train_combs = valid[:split_idx]
-        test_combs = valid[split_idx:]
+        
+        # 保证尽量提取 args.test_size 的验证数据
+        actual_test_size = args.test_size
+        if len(valid) <= args.test_size:
+            actual_test_size = max(1, int(len(valid) * 0.5))
+        elif len(valid) - args.test_size < 10:
+            actual_test_size = len(valid) - 10
+
+        test_combs = valid[:actual_test_size]
+        train_combs = valid[actual_test_size:]
 
         difficulty = DIFFICULTY_MAP.get(n, f"n{n}")
 
