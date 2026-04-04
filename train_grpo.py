@@ -2,11 +2,18 @@
 train_grpo.py — GRPO (Group Relative Policy Optimization) 训练脚本
 支持 G∈{8,16,32,64} 消融实验、逐层梯度追踪、Batch Size 对齐
 
+论文改进:
+  1. Length-Aware Reward Normalization (--length-norm)
+     对 advantage 乘以 mean_len / resp_len 因子，消除长度偏差
+  2. Dual-Phase Reward Schedule (--reward-schedule dual)
+     训练前期用 dense continuous reward，后期自动切换为 sparse binary reward
+
 用法:
     python train_grpo.py                          # 默认 G=32
     python train_grpo.py --group-size 8           # G=8 消融
     python train_grpo.py --group-size 64 --lr 3e-6
     python train_grpo.py --epochs 2 --save-every 20
+    python train_grpo.py --length-norm --reward-schedule dual  # 启用两项改进
 """
 
 import os
@@ -110,6 +117,19 @@ def parse_args():
     parser.add_argument("--kl-high", type=float, default=4.0, help="KL 上界阈值 (适度放开以允许探索)")
     parser.add_argument("--kl-low", type=float, default=1.0, help="KL 下界阈值")
 
+    # ── 论文改进 1: Length-Aware Reward Normalization ──
+    parser.add_argument("--length-norm", action="store_true", default=False,
+                        help="启用长度感知归一化: advantage *= mean_len / resp_len")
+
+    # ── 论文改进 2: Dual-Phase Reward Schedule ──
+    parser.add_argument("--reward-schedule", type=str, default="fixed",
+                        choices=["fixed", "dual"],
+                        help="奖励调度策略。fixed=始终用 dense reward; dual=前期 dense 后期 binary")
+    parser.add_argument("--phase-switch-threshold", type=float, default=0.10,
+                        help="Dual-Phase: EMA 成功率超过此阈值时切换为 binary reward (默认 0.10)")
+    parser.add_argument("--ema-alpha", type=float, default=0.05,
+                        help="EMA 平滑系数 (越小越平滑，默认 0.05)")
+
     return parser.parse_args()
 
 
@@ -131,6 +151,11 @@ def train(args):
     print(f"  epochs               = {args.epochs}")
     print(f"  data                 = {args.data_file}")
     print(f"  sft_path             = {args.sft_path}")
+    print(f"  length_norm          = {args.length_norm}")
+    print(f"  reward_schedule      = {args.reward_schedule}")
+    if args.reward_schedule == 'dual':
+        print(f"  phase_switch_thresh  = {args.phase_switch_threshold}")
+        print(f"  ema_alpha            = {args.ema_alpha}")
     print(f"{'='*60}\n")
 
     os.makedirs(args.log_dir, exist_ok=True)
@@ -145,7 +170,8 @@ def train(args):
         csv_writer.writerow([
             "step", "success_rate", "policy_entropy",
             "kl_div", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment", "mean_response_length",
-            "vram_allocated_gb", "vram_peak_gb", "vram_reserved_gb"
+            "vram_allocated_gb", "vram_peak_gb", "vram_reserved_gb",
+            "reward_phase", "ema_success_rate"
         ])
 
     response_file = open(os.path.join(args.log_dir, f'{log_tag}_responses.txt'), mode, encoding='utf-8')
@@ -194,6 +220,11 @@ def train(args):
     device = model.device
     optimizer.zero_grad()
     training_done = False  # 用于跳出双层循环
+
+    # ── Dual-Phase Reward Schedule 状态 ──
+    ema_success = 0.0           # EMA 滑动成功率
+    reward_phase = "dense"      # 当前奖励阶段: "dense" (连续距离) / "binary" (二元)
+    phase_switched = False      # 是否已切换过
 
     metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0, "resp_len": 0.0}
 
@@ -268,14 +299,32 @@ def train(args):
                 if step == 0 and i == 0:
                     print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
 
-                group_rewards_list, corrects = compute_rewards_parallel(
-                    [num_str] * G, responses
-                )
+                # ── Dual-Phase Reward Schedule: 根据当前阶段选择奖励模式 ──
+                if args.reward_schedule == 'dual' and reward_phase == 'binary':
+                    # Phase 2: Binary reward (简化绝对信号)
+                    group_rewards_list, corrects = compute_rewards_parallel(
+                        [num_str] * G, responses, simple_mode='binary'
+                    )
+                else:
+                    # Phase 1 / fixed: Dense continuous reward (原始模式)
+                    group_rewards_list, corrects = compute_rewards_parallel(
+                        [num_str] * G, responses
+                    )
 
                 group_rewards = torch.tensor(group_rewards_list, dtype=torch.float32).to(device, non_blocking=True)
                 mean_r = group_rewards.mean()
                 std_r = group_rewards.std() + 1e-4  # 增大平滑项，防止极寒环境下的优势爆炸
                 advantages = (group_rewards - mean_r) / std_r
+
+                # ── 改进 1: Length-Aware Reward Normalization ──
+                # 消除 sequence-level advantage 广播到不同长度 response 时的隐性 length bias
+                # 原理: advantage *= (group_mean_len / per_response_len)
+                #   → 更长的 response 获得更小的 per-token advantage
+                if args.length_norm:
+                    resp_lengths = (resp_tensors != tokenizer.pad_token_id).float().sum(dim=1)
+                    mean_len = resp_lengths.mean()
+                    length_factor = mean_len / resp_lengths.clamp(min=1.0)
+                    advantages = advantages * length_factor
 
                 input_ids = group_out
                 attention_mask = (input_ids != tokenizer.pad_token_id).long()
@@ -436,18 +485,30 @@ def train(args):
                 vram_reserved = torch.cuda.memory_reserved() / 1e9
                 torch.cuda.reset_peak_memory_stats()  # 重置峰值以追踪每步
 
+                # ── Dual-Phase Reward Schedule: EMA 更新与自动切换 ──
+                ema_success = (1 - args.ema_alpha) * ema_success + args.ema_alpha * avg_succ
+                if (args.reward_schedule == 'dual'
+                        and not phase_switched
+                        and ema_success >= args.phase_switch_threshold):
+                    reward_phase = 'binary'
+                    phase_switched = True
+                    print(f"\n  🔄 [Dual-Phase] 奖励模式切换: dense → binary "
+                          f"(EMA_succ={ema_success:.3f} ≥ {args.phase_switch_threshold})")
+
                 csv_writer.writerow([
                     update_step, avg_succ, avg_entropy, avg_kl,
                     avg_adv, avg_adv_std,
                     grad_norm.item() if hasattr(grad_norm, 'item') else grad_norm,
                     second_moment, avg_resp_len,
-                    f"{vram_alloc:.2f}", f"{vram_peak:.2f}", f"{vram_reserved:.2f}"
+                    f"{vram_alloc:.2f}", f"{vram_peak:.2f}", f"{vram_reserved:.2f}",
+                    reward_phase, f"{ema_success:.4f}"
                 ])
                 log_file.flush()
 
+                phase_tag = f" [{reward_phase}]" if args.reward_schedule == 'dual' else ""
                 print(f"Update {update_step} (Step {step}) | Succ: {avg_succ:.3f} | "
                       f"R: {avg_adv:.2f} | KL: {avg_kl:.4f} | |g|: {grad_norm:.4f} | β: {beta:.4f} | "
-                      f"VRAM: {vram_alloc:.1f}/{vram_peak:.1f} GB")
+                      f"VRAM: {vram_alloc:.1f}/{vram_peak:.1f} GB{phase_tag}")
 
                 if update_step > 0 and update_step % args.save_every == 0:
                     save_dir = os.path.join(args.output_dir, f"grpo_G{G}_update_{update_step}")

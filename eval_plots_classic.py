@@ -165,6 +165,287 @@ def plot_g_ablation(log_dir='logs', output_dir='plots'):
     print(f"✅ G 消融对比图 (经典版) → {output_dir}/grpo_g_ablation_classic.png")
 
 
+import json
+
+def plot_eval_summary(log_dir='logs', output_dir='plots'):
+    """最终评估测试集成功率对比柱状图 (经典版)"""
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 尝试从 jsonl 搜集结果
+    eval_files = glob.glob(os.path.join(log_dir, 'eval_*.jsonl'))
+    if not eval_files:
+        return
+        
+    records = []
+    for f in eval_files:
+        basename = os.path.basename(f)
+        # 移除 'eval_' 前缀和 '.jsonl' 后缀
+        name_parts = basename.replace('eval_', '').replace('.jsonl', '').rsplit('_', 1)
+        if len(name_parts) == 2:
+            model_name, n_key = name_parts
+        else:
+            model_name = name_parts[0]
+            n_key = "all"
+            
+        correct = 0
+        total = 0
+        with open(f, 'r', encoding='utf-8') as jf:
+            for line in jf:
+                try:
+                    data = json.loads(line)
+                    total += 1
+                    if data.get('correct', False):
+                        correct += 1
+                except:
+                    pass
+        if total > 0:
+            records.append({'model': model_name, 'n_key': n_key, 'accuracy': correct / total})
+
+    if not records:
+        return
+
+    # 构建 DataFrame
+    df_records = pd.DataFrame(records)
+    
+    df_records['n_key'] = df_records['n_key'].apply(lambda x: f"N={x}" if str(x).isdigit() else str(x).upper())
+    df_records['accuracy'] = df_records['accuracy'] * 100
+    
+    # pivot 使模型成为 index，N=... 成为 columns
+    df_pivot = df_records.pivot(index='model', columns='n_key', values='accuracy')
+    
+    # 对 index 排序，PPO 放前面
+    models = list(df_pivot.index)
+    models.sort(key=lambda x: (0 if 'ppo' in x.lower() else 1, x))
+    df_pivot = df_pivot.reindex(models)
+    
+    # 画图 (df_pivot.T 使得 X 轴是 Difficulty Level，不同颜色是 Model)
+    ax = df_pivot.T.plot(kind='bar', figsize=(10, 6), colormap='tab10', edgecolor='black', alpha=0.85)
+    
+    ax.set_title('Evaluation Success Rate on Test Set (Zero-Shot) - Classic', fontsize=14, pad=15)
+    ax.set_ylabel('Success Rate (%)', fontsize=12)
+    ax.set_xlabel('Difficulty Level', fontsize=12)
+    
+    # 动态 Y 轴
+    max_acc = df_records['accuracy'].max()
+    ax.set_ylim(0, max(max_acc * 1.2, 5.0))
+    
+    # 在柱子上添加具体数值标签
+    for container in ax.containers:
+        ax.bar_label(container, fmt='%.1f%%', padding=3, fontsize=9)
+    
+    # 网格和图例
+    ax.grid(axis='y', linestyle='--', alpha=0.5)
+    ax.legend(title='Model', bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    # 旋转 x 轴标签防止重叠
+    plt.xticks(rotation=0)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'eval_summary_classic.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"✅ 评测成功率汇总柱状图 (经典版) → {output_dir}/eval_summary_classic.png")
+
+
+def plot_difficulty_curve(log_dir='logs', output_dir='plots'):
+    """评测成功率难度曲线 (带多次 Seed 误差带, 经典版)"""
+    os.makedirs(output_dir, exist_ok=True)
+    
+    eval_files = glob.glob(os.path.join(log_dir, 'eval_*.jsonl'))
+    if not eval_files:
+        return
+        
+    records = []
+    for f in eval_files:
+        basename = os.path.basename(f)
+        raw_name = basename.replace('eval_', '').replace('.jsonl', '')
+        
+        name_parts = raw_name.rsplit('_', 1)
+        if len(name_parts) == 2 and (name_parts[1].isdigit() or name_parts[1] == 'all'):
+            model_full_name, n_key = name_parts
+        else:
+            model_full_name = raw_name
+            n_key = "all"
+            
+        if n_key == "all":
+            continue
+            
+        n_val = int(n_key)
+            
+        base_model = model_full_name
+        seed = 1
+        
+        if "_seed_" in model_full_name:
+            parts = model_full_name.split("_seed_")
+            base_model = parts[0]
+            try:
+                seed = int(parts[1])
+            except ValueError:
+                pass
+                
+        display_name = base_model.upper().replace('_FINAL', '')
+        
+        correct = 0
+        total = 0
+        with open(f, 'r', encoding='utf-8') as jf:
+            for line in jf:
+                try:
+                    data = json.loads(line)
+                    total += 1
+                    if data.get('correct', False):
+                        correct += 1
+                except:
+                    pass
+                    
+        if total > 0:
+            records.append({
+                'Model': display_name, 
+                'Difficulty (N)': n_val, 
+                'Seed': seed,
+                'Success Rate (%)': (correct / total) * 100
+            })
+
+    if not records:
+        return
+
+    df = pd.DataFrame(records)
+    
+    # 手动计算 mean 和 std 进行绘制
+    agg_df = df.groupby(['Model', 'Difficulty (N)'])['Success Rate (%)'].agg(['mean', 'std']).reset_index()
+    # 填充缺失值为0 (如果单个 seed std 会是 NaN)
+    agg_df['std'] = agg_df['std'].fillna(0)
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    models = agg_df['Model'].unique().tolist()
+    models.sort(key=lambda x: (0 if 'PPO' in x else 1, x))
+    
+    colors = plt.cm.tab10.colors
+    
+    for i, model in enumerate(models):
+        m_df = agg_df[agg_df['Model'] == model].sort_values('Difficulty (N)')
+        x = m_df['Difficulty (N)'].values
+        y_mean = m_df['mean'].values
+        y_std = m_df['std'].values
+        
+        color = colors[i % len(colors)]
+        
+        ax.plot(x, y_mean, marker='o', label=model, linewidth=2, color=color)
+        if y_std.max() > 0:  # 只有包含多个 seed 有方差时才画填充带
+            ax.fill_between(x, y_mean - y_std, y_mean + y_std, color=color, alpha=0.2)
+    
+    ax.set_title('Zero-Shot Success Rate vs. Difficulty (Mean ± 1 Std) - Classic', fontsize=14, pad=15)
+    ax.set_ylabel('Success Rate (%)', fontsize=12)
+    ax.set_xlabel('Difficulty Level', fontsize=12)
+    
+    max_acc = df['Success Rate (%)'].max()
+    # 让0附近的值也能清晰看出差别 (Symmetric Log Scale)
+    ax.set_yscale('symlog', linthresh=1.0)
+    import matplotlib.ticker as ticker
+    ax.yaxis.set_major_formatter(ticker.ScalarFormatter())
+    ax.set_yticks([0, 1, 5, 10, 20, 50, 100])
+    
+    unique_n = sorted(df['Difficulty (N)'].unique())
+    ax.set_xticks(unique_n)
+    
+    ax.grid(True, linestyle='--', alpha=0.5)
+    ax.legend(title='Model', loc='best')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'diff_success_curve_classic.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"✅ 难度-成功率曲线图(SymLog) (经典版) → {output_dir}/diff_success_curve_classic.png")
+
+def plot_success_heatmap(log_dir='logs', output_dir='plots'):
+    """生成高级别论文常见的 Success Rate Heatmap (模型 vs 难度) - 经典配色"""
+    os.makedirs(output_dir, exist_ok=True)
+    
+    eval_files = glob.glob(os.path.join(log_dir, 'eval_*.jsonl'))
+    if not eval_files:
+        return
+        
+    records = []
+    for f in eval_files:
+        basename = os.path.basename(f)
+        raw_name = basename.replace('eval_', '').replace('.jsonl', '')
+        
+        name_parts = raw_name.rsplit('_', 1)
+        if len(name_parts) == 2 and (name_parts[1].isdigit() or name_parts[1] == 'all'):
+            model_full_name, n_key = name_parts
+        else:
+            model_full_name = raw_name
+            n_key = "all"
+            
+        if n_key == "all":
+            continue
+            
+        n_val = int(n_key)
+        
+        base_model = model_full_name
+        if "_seed_" in model_full_name:
+            base_model = model_full_name.split("_seed_")[0]
+            
+        display_name = base_model.upper().replace('_FINAL', '')
+        
+        correct = 0
+        total = 0
+        with open(f, 'r', encoding='utf-8') as jf:
+            for line in jf:
+                try:
+                    data = json.loads(line)
+                    total += 1
+                    if data.get('correct', False):
+                        correct += 1
+                except:
+                    pass
+                    
+        if total > 0:
+            records.append({
+                'Model': display_name, 
+                'Difficulty (N)': f"N={n_val}", 
+                'Success Rate': (correct / total) * 100
+            })
+
+    if not records:
+        return
+
+    df = pd.DataFrame(records)
+    agg_df = df.groupby(['Model', 'Difficulty (N)'])['Success Rate'].mean().reset_index()
+    
+    pivot_df = agg_df.pivot(index='Model', columns='Difficulty (N)', values='Success Rate')
+    
+    models = list(pivot_df.index)
+    models.sort(key=lambda x: (0 if 'PPO' in x else 1, x))
+    pivot_df = pivot_df.reindex(models)
+    
+    fig, ax = plt.subplots(figsize=(8, max(4, len(models)*0.8)))
+    
+    import seaborn as sns
+    sns.heatmap(
+        pivot_df, 
+        annot=True, 
+        fmt=".1f", # 1位小数
+        cmap="coolwarm", # 经典红蓝冷暖配色
+        cbar_kws={'label': 'Success Rate (%)'},
+        linewidths=1,
+        linecolor='black',
+        ax=ax
+    )
+    
+    ax.xaxis.tick_top()
+    ax.xaxis.set_label_position('top')
+    
+    ax.set_title("Zero-Shot Success Rate Across Difficulty Levels (Classic)", pad=30, fontweight='bold', fontsize=14)
+    ax.set_ylabel("Model Architecture", fontsize=12)
+    ax.set_xlabel("Task Difficulty", fontsize=12)
+    
+    plt.yticks(rotation=0)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'success_rate_heatmap_classic.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"✅ 模型难度热力图 (Heatmap) (经典版) → {output_dir}/success_rate_heatmap_classic.png")
+
+
 def main():
     parser = argparse.ArgumentParser(description="生成经典版论文图表")
     parser.add_argument("--ablation", action="store_true", help="生成 G 消融图")
@@ -178,6 +459,11 @@ def main():
 
     if args.all or args.ablation:
         plot_g_ablation(args.log_dir, args.output_dir)
+        
+    if args.all:
+        plot_eval_summary(args.log_dir, args.output_dir)
+        plot_difficulty_curve(args.log_dir, args.output_dir)
+        plot_success_heatmap(args.log_dir, args.output_dir)
 
     print(f"\n📊 经典版所有图表已生成至 '{args.output_dir}/' 目录")
 

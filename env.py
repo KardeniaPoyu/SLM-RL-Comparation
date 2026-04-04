@@ -15,8 +15,10 @@ _RE_EQUATION = re.compile(r'([\d\.\s\+\-\*\/\(\)]+)=([\s\-\d\.]+)')
 class Arithmetic24Env:
     def __init__(self, simple_mode=True):
         """
-        simple_mode=True:  二元奖励 (correct=+1, wrong=0)，RL 前期推荐
-        simple_mode=False: 复合多阶段奖励 (保留原有逻辑)，RL 后期可切换
+        simple_mode=True:    分层连续递进奖励 (含距离衰减)，RL 前期推荐
+        simple_mode=False:   复合多阶段奖励 (保留原有逻辑)，RL 后期可切换
+        simple_mode='binary': 严格二元奖励 (correct=1, wrong=0, garbage=-0.5)
+                              用于 Dual-Phase Reward Schedule 的 Phase 2
         """
         self.simple_mode = simple_mode
 
@@ -94,15 +96,16 @@ class Arithmetic24Env:
             result = eval(expr_str, {"__builtins__": {}}, {})
             
             if result is None:
-                return False, "Math error"
+                return False, "Math error", None
                 
             if abs(float(result) - 24.0) < 1e-5:
-                return True, "Correct"
-            return False, "Wrong value"
+                # 增加了返回 float 结果的能力
+                return True, "Correct", float(result)
+            return False, "Wrong value", float(result)
         except ZeroDivisionError:
-            return False, "Math error (Division by zero)"
+            return False, "Math error (Division by zero)", None
         except Exception:
-            return False, "Math error"
+            return False, "Math error", None
 
     def _evaluate_intermediate_steps(self, think_content):
         """
@@ -148,52 +151,87 @@ class Arithmetic24Env:
     def compute_reward(self, input_nums_str, output_text):
         """
         奖励函数。
-        simple_mode=True:  分层递进奖励，全部非负，RL 训练推荐
+        simple_mode=True: 分层连续递进奖励，包含距离衰减 (0.3 -> ~0.8) 与防作弊惩罚 (-0.5)
         simple_mode=False: 复合多阶段奖励 (保留原有逻辑，含负奖励)
-
-        simple_mode 分层设计：
-          Tier 0 (0.0) : 垃圾输出 — 多标签 / 无表达式 / 含乱码
-          Tier 1 (0.1) : 有尝试   — 输出了 </think> + 某种表达式（但不合法）
-          Tier 2 (0.3) : 接近正确 — 使用了正确数字的合法表达式，但值≠24
-          Tier 3 (1.0) : 正确     — 表达式=24
-          Tier 4 (1.2) : 优秀     — 正确 + 有清晰推理过程
         """
+        import math
+        
         target_nums = [n.strip() for n in input_nums_str.split(',')]
+        N_expected = len(target_nums)
         has_think_open, has_think_close, pred_expr, think_close_count, think_content = self._parse_output(output_text)
 
-        # ── 分层递进模式 (全部非负，避免 policy collapse) ──
-        if self.simple_mode:
-            # Tier 0: 垃圾输出
+        # ── Dual-Phase Binary 模式 (Phase 2: Anti-Reward-Hacking) ──
+        if self.simple_mode == 'binary':
+            # 最简洁的信号: 正确=1, 格式错误=-0.5, 其他错误=0
             if think_close_count > 1 or not pred_expr:
-                return 0.0, False
+                return -0.5, False
             if _RE_GARBAGE.search(pred_expr):
+                return -0.5, False
+
+            is_correct, reason, eval_result = self._verify_expression(pred_expr, target_nums)
+            if is_correct:
+                return 1.0, True
+            else:
                 return 0.0, False
 
+        # ── 连续化模式 (Distance Reward & Anti-Hallucination) ──
+        if self.simple_mode:
+            # Tier 0: 垃圾输出惩罚
+            if think_close_count > 1 or not pred_expr:
+                return -0.5, False  # 修改为严厉惩罚，避免乱用标签
+            if _RE_GARBAGE.search(pred_expr):
+                return -0.5, False
+
+            # Anti-Hallucination: 思维链捏造检查。像 "剩余: [6, 12, 6]" 这样没越算越少的
+            remain_matches = re.finditer(r'(?:剩余|还剩下|剩?下?的?数?是?:?)\s*[:：]?\s*\[(.*?)\]', think_content)
+            for match in remain_matches:
+                arr_str = match.group(1)
+                # 使用已有逻辑提取
+                digits = _RE_DIGITS.findall(arr_str)
+                if len(digits) >= N_expected:
+                    # 抓到造假
+                    return -0.5, False
+
             # 尝试验证表达式
-            is_correct, reason = self._verify_expression(pred_expr, target_nums)
+            is_correct, reason, eval_result = self._verify_expression(pred_expr, target_nums)
+
+            # Number Count Mismatch - 极其核心的防 N=4 过拟合查杀点
+            # 如果没凑对但使用了错误的数字量，不管是不是报错，统统罚款
+            try:
+                digits = _RE_DIGITS.findall(pred_expr.split('=')[0])
+                if len(digits) > 0 and len(digits) != N_expected:
+                    return -0.5, False
+            except Exception:
+                pass
+
 
             if is_correct:
                 # Tier 3/4: 正确
                 reward = 1.0
                 if has_think_close and len(think_content) > 10:
-                    reward = 1.2  # Tier 4: 优秀 — 有推理过程
+                    reward = 1.5  # Tier 4: 优秀 — 有推理过程 (提高上线增加探索吸引力)
                 return reward, True
             else:
-                # 区分 "接近正确" 和 "随便写的"
-                if reason == "Wrong value":
-                    # Tier 2: 使用了正确数字，合法表达式，但算出来≠24
-                    reward = 0.3
+                # "距离连续判定" - 使用了正确的数字并计算出结果，但不是24
+                if reason == "Wrong value" and eval_result is not None:
+                    # 例如，算出22，距离是 2。exp(-0.2) ≈ 0.81 * 0.8 ≈ 0.65
+                    # 例如，算出100，距离是 76。exp(-7.6) 趋近于 0
+                    dist = abs(eval_result - 24.0)
+                    continuous_r = 0.8 * math.exp(-dist / 10.0) 
+                    
+                    # 避免给了合法错误组合和直接写0.1差不多，稍微给点甜头
+                    reward = 0.1 + max(0.0, continuous_r)
+                    
                     if has_think_close:
                         reward += 0.05
-                    return reward, False
+                    return min(0.95, reward), False  # 封顶不到 1.0 (防止抢走真正24的风头)
+                    
                 elif reason in ("Used wrong numbers", "Invalid characters", "Exponentiation not allowed"):
-                    # Tier 1: 至少有个表达式，但数字用错了
-                    reward = 0.1
-                    if has_think_close:
-                        reward += 0.05
+                    # Tier 1: 至少有个表达式，但数字用错了。由于前面有 Number Count 检测，这里拦截的是篡改数值的幻觉
+                    reward = -0.2  # 不是0.1，用错了数字其实就是幻觉
                     return reward, False
                 else:
-                    # Tier 1: 数学错误 / 解析错误
+                    # Tier 1: 数学错误 / 解析错误 (如 1/0)
                     reward = 0.1 if has_think_close else 0.0
                     return reward, False
 
@@ -242,7 +280,7 @@ class Arithmetic24Env:
             reward -= 0.3
 
         # ── 阶段4：数学验证 ──
-        is_correct, reason = self._verify_expression(pred_expr, target_nums)
+        is_correct, reason, eval_result = self._verify_expression(pred_expr, target_nums)
         if is_correct:
             reward += 4.0
             operators = sum(1 for c in pred_expr if c in '+-*/')
@@ -289,7 +327,9 @@ def _get_reward_pool():
 def compute_rewards_parallel(nums_list, responses, simple_mode=True):
     """
     并行计算奖励（利用多核 CPU 加速字符串解析）。
-    simple_mode=True: 二元奖励 (correct=+1, wrong=0)，RL 前期推荐
+    simple_mode=True:     分层连续递进奖励，RL 前期及 fixed schedule 推荐
+    simple_mode='binary':  严格二元奖励，用于 Dual-Phase 的 Phase 2
+    simple_mode=False:    复合多阶段奖励
     返回: (rewards_list, corrects_count)
     """
     global _global_simple_mode
