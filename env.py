@@ -63,7 +63,7 @@ class Arithmetic24Env:
         安全性由前置的字符白名单保证。
         """
         if not expr_str:
-            return False, "Empty expression"
+            return False, "Empty expression", None
 
         expr_str = expr_str.split('=')[0].strip()
 
@@ -73,18 +73,18 @@ class Arithmetic24Env:
             used_nums = sorted([int(d) for d in digits])
             target_nums_int = sorted([int(n) for n in target_nums])
         except ValueError:
-            return False, "Parse error"
+            return False, "Parse error", None
 
         if used_nums != target_nums_int:
-            return False, "Used wrong numbers"
+            return False, "Used wrong numbers", None
 
         # 2. 字符白名单（这一步保证了 eval() 的安全性）
         if not _RE_WHITELIST.fullmatch(expr_str):
-            return False, "Invalid characters"
+            return False, "Invalid characters", None
 
         # 3. 禁用指数运算
         if "**" in expr_str:
-            return False, "Exponentiation not allowed"
+            return False, "Exponentiation not allowed", None
 
         # 4. 极速数学求值：用 Python eval() 替代 SymPy
         try:

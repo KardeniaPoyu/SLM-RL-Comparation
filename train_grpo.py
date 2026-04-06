@@ -5,21 +5,26 @@ train_grpo.py — GRPO (Group Relative Policy Optimization) 训练脚本
 论文改进:
   1. Length-Aware Reward Normalization (--length-norm)
      对 advantage 乘以 mean_len / resp_len 因子，消除长度偏差
-  2. Dual-Phase Reward Schedule (--reward-schedule dual)
-     训练前期用 dense continuous reward，后期自动切换为 sparse binary reward
+  2. Reward Schedule (--reward-schedule fixed|dual|anneal)
+     fixed=始终 dense; dual=硬切换; anneal=基于 sigmoid 的平滑退火
+  3. Advantage Clipping (--adv-clip)
+     裁剪极端优势值，防止双峰奖励分布下的梯度爆炸
+  4. Solvable-Only Filtering (--filter-solvable)
+     预计算过滤不可解题目，避免无效梯度更新
 
 用法:
     python train_grpo.py                          # 默认 G=32
     python train_grpo.py --group-size 8           # G=8 消融
-    python train_grpo.py --group-size 64 --lr 3e-6
-    python train_grpo.py --epochs 2 --save-every 20
-    python train_grpo.py --length-norm --reward-schedule dual  # 启用两项改进
+    python train_grpo.py --length-norm --reward-schedule anneal --adv-clip
 """
 
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import argparse
+import math
+import re as re_module
+import itertools
 import json
 import torch
 import torch.nn.functional as F
@@ -30,10 +35,48 @@ from model_utils import load_model_and_tokenizer, collect_per_layer_grad_stats
 from env import Arithmetic24Env, compute_rewards_parallel
 
 
+# ── 辅助函数 ──
+
+def solve_24_fast(nums):
+    """
+    轻量级穷举求解器: 判断给定数字是否能通过四则运算得到 24。
+    用于 --filter-solvable 预过滤。返回 True/False。
+    """
+    nums = [float(x) for x in nums]
+    if len(nums) == 1:
+        return abs(nums[0] - 24.0) < 1e-5
+
+    for i in range(len(nums)):
+        for j in range(len(nums)):
+            if i == j:
+                continue
+            remaining = [nums[k] for k in range(len(nums)) if k != i and k != j]
+            a, b = nums[i], nums[j]
+            candidates = [a + b, a - b, a * b]
+            if b != 0:
+                candidates.append(a / b)
+            for c in candidates:
+                if solve_24_fast(remaining + [c]):
+                    return True
+    return False
+
+
+def blended_reward(dense_r, binary_r, ema_success, threshold=0.10, temp=0.02):
+    """
+    Smooth sigmoid-based transition from dense to binary reward.
+    alpha=0 → pure dense; alpha=1 → pure binary.
+    """
+    alpha = 1.0 / (1.0 + math.exp(-(ema_success - threshold) / max(temp, 1e-8)))
+    return (1.0 - alpha) * dense_r + alpha * binary_r
+
+
 class MathDataset(Dataset):
-    def __init__(self, data_file, tokenizer, env, max_samples=None):
+    def __init__(self, data_file, tokenizer, env, max_samples=None,
+                 filter_solvable=False):
         self.queries = []
         self.input_nums = []
+
+        raw_nums_list = []  # 先收集所有 nums_str
 
         # 支持 CSV 和 JSONL 两种格式
         if data_file.endswith('.jsonl'):
@@ -42,22 +85,31 @@ class MathDataset(Dataset):
                     if max_samples and i >= max_samples:
                         break
                     record = json.loads(line.strip())
-                    nums = record['nums']
-                    self.input_nums.append(nums)
-                    prompt = env.get_prompt(nums)
-                    tokens = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
-                    self.queries.append(tokens)
+                    raw_nums_list.append(record['nums'])
         else:
             with open(data_file, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
                 for i, row in enumerate(reader):
                     if max_samples and i >= max_samples:
                         break
-                    nums = row['nums']
-                    self.input_nums.append(nums)
-                    prompt = env.get_prompt(nums)
-                    tokens = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
-                    self.queries.append(tokens)
+                    raw_nums_list.append(row['nums'])
+
+        # 可选: 预过滤不可解题目
+        if filter_solvable:
+            before = len(raw_nums_list)
+            raw_nums_list = [
+                ns for ns in raw_nums_list
+                if solve_24_fast([n.strip() for n in ns.split(',')])
+            ]
+            after = len(raw_nums_list)
+            print(f"  🔍 Solvable filter: {before} → {after} problems "
+                  f"({before - after} unsolvable removed)")
+
+        for nums in raw_nums_list:
+            self.input_nums.append(nums)
+            prompt = env.get_prompt(nums)
+            tokens = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
+            self.queries.append(tokens)
 
     def __len__(self):
         return len(self.queries)
@@ -121,14 +173,26 @@ def parse_args():
     parser.add_argument("--length-norm", action="store_true", default=False,
                         help="启用长度感知归一化: advantage *= mean_len / resp_len")
 
-    # ── 论文改进 2: Dual-Phase Reward Schedule ──
+    # ── 论文改进 2: Reward Schedule ──
     parser.add_argument("--reward-schedule", type=str, default="fixed",
-                        choices=["fixed", "dual"],
-                        help="奖励调度策略。fixed=始终用 dense reward; dual=前期 dense 后期 binary")
+                        choices=["fixed", "dual", "anneal"],
+                        help="奖励调度。fixed=始终 dense; dual=硬切换; anneal=sigmoid 平滑退火")
     parser.add_argument("--phase-switch-threshold", type=float, default=0.10,
-                        help="Dual-Phase: EMA 成功率超过此阈值时切换为 binary reward (默认 0.10)")
+                        help="Dual/Anneal: EMA 成功率阈值 (默认 0.10)")
+    parser.add_argument("--anneal-temp", type=float, default=0.02,
+                        help="Anneal: sigmoid 温度，越小切换越锐利 (默认 0.02)")
     parser.add_argument("--ema-alpha", type=float, default=0.05,
                         help="EMA 平滑系数 (越小越平滑，默认 0.05)")
+
+    # ── 论文改进 3: Advantage Clipping ──
+    parser.add_argument("--adv-clip", action="store_true", default=False,
+                        help="裁剪 advantage 到 [-adv_clip_range, +adv_clip_range]")
+    parser.add_argument("--adv-clip-range", type=float, default=3.0,
+                        help="Advantage 裁剪范围 (默认 3.0 sigma)")
+
+    # ── 论文改进 4: Solvable-Only Filtering ──
+    parser.add_argument("--filter-solvable", action="store_true", default=False,
+                        help="预过滤不可解题目 (利用穷举/回溯预判)")
 
     return parser.parse_args()
 
@@ -153,9 +217,13 @@ def train(args):
     print(f"  sft_path             = {args.sft_path}")
     print(f"  length_norm          = {args.length_norm}")
     print(f"  reward_schedule      = {args.reward_schedule}")
-    if args.reward_schedule == 'dual':
+    print(f"  adv_clip             = {args.adv_clip} (range={args.adv_clip_range})")
+    print(f"  filter_solvable      = {args.filter_solvable}")
+    if args.reward_schedule in ('dual', 'anneal'):
         print(f"  phase_switch_thresh  = {args.phase_switch_threshold}")
         print(f"  ema_alpha            = {args.ema_alpha}")
+    if args.reward_schedule == 'anneal':
+        print(f"  anneal_temp          = {args.anneal_temp}")
     print(f"{'='*60}\n")
 
     os.makedirs(args.log_dir, exist_ok=True)
@@ -196,7 +264,9 @@ def train(args):
     model, tokenizer = load_model_and_tokenizer(with_value_head=False, lora_resume_path=sft_path)
     model.is_peft_model = True
 
-    dataset = MathDataset(args.data_file, tokenizer, env, max_samples=args.max_samples)
+    dataset = MathDataset(args.data_file, tokenizer, env,
+                          max_samples=args.max_samples,
+                          filter_solvable=args.filter_solvable)
     # num_workers=0: 数据已在 __init__ 全部预加载到内存，workers 只会增加 IPC 开销
     dataloader = DataLoader(dataset, batch_size=bs, shuffle=True, collate_fn=lambda x: x)
 
@@ -221,10 +291,11 @@ def train(args):
     optimizer.zero_grad()
     training_done = False  # 用于跳出双层循环
 
-    # ── Dual-Phase Reward Schedule 状态 ──
+    # ── Reward Schedule 状态 ──
     ema_success = 0.0           # EMA 滑动成功率
-    reward_phase = "dense"      # 当前奖励阶段: "dense" (连续距离) / "binary" (二元)
-    phase_switched = False      # 是否已切换过
+    reward_phase = "dense"      # 当前奖励阶段 (仅 dual 模式用)
+    phase_switched = False      # dual 模式: 是否已切换过
+    anneal_alpha = 0.0          # anneal 模式: 当前插值系数
 
     metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0, "resp_len": 0.0}
 
@@ -299,14 +370,28 @@ def train(args):
                 if step == 0 and i == 0:
                     print(f"\n[模型原始输出观察]:\n{responses[0]}\n")
 
-                # ── Dual-Phase Reward Schedule: 根据当前阶段选择奖励模式 ──
+                # ── Reward Schedule: 根据模式选择奖励 ──
                 if args.reward_schedule == 'dual' and reward_phase == 'binary':
                     # Phase 2: Binary reward (简化绝对信号)
                     group_rewards_list, corrects = compute_rewards_parallel(
                         [num_str] * G, responses, simple_mode='binary'
                     )
+                elif args.reward_schedule == 'anneal':
+                    # Anneal mode: 同时计算 dense 和 binary，按 alpha 混合
+                    dense_rewards, corrects = compute_rewards_parallel(
+                        [num_str] * G, responses
+                    )
+                    binary_rewards, _ = compute_rewards_parallel(
+                        [num_str] * G, responses, simple_mode='binary'
+                    )
+                    group_rewards_list = [
+                        blended_reward(d, b, ema_success,
+                                       threshold=args.phase_switch_threshold,
+                                       temp=args.anneal_temp)
+                        for d, b in zip(dense_rewards, binary_rewards)
+                    ]
                 else:
-                    # Phase 1 / fixed: Dense continuous reward (原始模式)
+                    # fixed / dual Phase 1: Dense continuous reward
                     group_rewards_list, corrects = compute_rewards_parallel(
                         [num_str] * G, responses
                     )
@@ -315,6 +400,10 @@ def train(args):
                 mean_r = group_rewards.mean()
                 std_r = group_rewards.std() + 1e-4  # 增大平滑项，防止极寒环境下的优势爆炸
                 advantages = (group_rewards - mean_r) / std_r
+
+                # ── 改进 3: Advantage Clipping ──
+                if args.adv_clip:
+                    advantages = torch.clamp(advantages, -args.adv_clip_range, args.adv_clip_range)
 
                 # ── 改进 1: Length-Aware Reward Normalization ──
                 # 消除 sequence-level advantage 广播到不同长度 response 时的隐性 length bias
@@ -485,15 +574,21 @@ def train(args):
                 vram_reserved = torch.cuda.memory_reserved() / 1e9
                 torch.cuda.reset_peak_memory_stats()  # 重置峰值以追踪每步
 
-                # ── Dual-Phase Reward Schedule: EMA 更新与自动切换 ──
+                # ── Reward Schedule: EMA 更新与自动切换 ──
                 ema_success = (1 - args.ema_alpha) * ema_success + args.ema_alpha * avg_succ
-                if (args.reward_schedule == 'dual'
-                        and not phase_switched
-                        and ema_success >= args.phase_switch_threshold):
-                    reward_phase = 'binary'
-                    phase_switched = True
-                    print(f"\n  🔄 [Dual-Phase] 奖励模式切换: dense → binary "
-                          f"(EMA_succ={ema_success:.3f} ≥ {args.phase_switch_threshold})")
+
+                if args.reward_schedule == 'dual':
+                    if not phase_switched and ema_success >= args.phase_switch_threshold:
+                        reward_phase = 'binary'
+                        phase_switched = True
+                        print(f"\n  🔄 [Dual-Phase] 奖励模式切换: dense → binary "
+                              f"(EMA_succ={ema_success:.3f} ≥ {args.phase_switch_threshold})")
+
+                if args.reward_schedule == 'anneal':
+                    anneal_alpha = 1.0 / (1.0 + math.exp(
+                        -(ema_success - args.phase_switch_threshold) / max(args.anneal_temp, 1e-8)
+                    ))
+                    reward_phase = f"anneal(α={anneal_alpha:.3f})"
 
                 csv_writer.writerow([
                     update_step, avg_succ, avg_entropy, avg_kl,
@@ -505,7 +600,12 @@ def train(args):
                 ])
                 log_file.flush()
 
-                phase_tag = f" [{reward_phase}]" if args.reward_schedule == 'dual' else ""
+                phase_tag = ""
+                if args.reward_schedule == 'dual':
+                    phase_tag = f" [{reward_phase}]"
+                elif args.reward_schedule == 'anneal':
+                    phase_tag = f" [anneal α={anneal_alpha:.3f}]"
+
                 print(f"Update {update_step} (Step {step}) | Succ: {avg_succ:.3f} | "
                       f"R: {avg_adv:.2f} | KL: {avg_kl:.4f} | |g|: {grad_norm:.4f} | β: {beta:.4f} | "
                       f"VRAM: {vram_alloc:.1f}/{vram_peak:.1f} GB{phase_tag}")
