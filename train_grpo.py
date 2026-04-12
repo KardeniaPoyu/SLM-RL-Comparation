@@ -1,21 +1,19 @@
 """
-train_grpo.py — GRPO (Group Relative Policy Optimization) 训练脚本
-支持 G∈{8,16,32,64} 消融实验、逐层梯度追踪、Batch Size 对齐
+train_grpo.py — GRPO / LAGRPO 训练脚本
+与论文《LAGRPO 三维优势重构》对齐：
+  1. 空间维 — 长度感知优势修正（组内零和保持）:
+       Â_i^len = Â_i - β_len * (L_i - L̄_group) / L̄_group
+     其中 Â_i 为标准 GRPO 组内标准化优势；因 Σ_i(L_i-L̄)=0，组内优势之和仍为 0。
+  2. 时间维 — 奖励退火:
+       • ema_anneal: 由 EMA 成功率驱动的 sigmoid 混合 dense/binary
+       • step_anneal: 由全局 update_step 线性过渡到 binary（论文工程版）
+  3. 方差维 — 双峰优势裁剪 ±c，可选裁剪后减均值以恢复组内零和
 
-论文改进:
-  1. Length-Aware Reward Normalization (--length-norm)
-     对 advantage 乘以 mean_len / resp_len 因子，消除长度偏差
-  2. Reward Schedule (--reward-schedule fixed|dual|anneal)
-     fixed=始终 dense; dual=硬切换; anneal=基于 sigmoid 的平滑退火
-  3. Advantage Clipping (--adv-clip)
-     裁剪极端优势值，防止双峰奖励分布下的梯度爆炸
-  4. Solvable-Only Filtering (--filter-solvable)
-     预计算过滤不可解题目，避免无效梯度更新
+消融预设: --ablation B0|B1|B2|B3|B4（与第 5 章实验表一致）
 
 用法:
-    python train_grpo.py                          # 默认 G=32
-    python train_grpo.py --group-size 8           # G=8 消融
-    python train_grpo.py --length-norm --reward-schedule anneal --adv-clip
+    python train_grpo.py --ablation B0 --group-size 32
+    python train_grpo.py --ablation B4 --exp-id lagrpo_full --max-steps 200
 """
 
 import os
@@ -70,6 +68,40 @@ def blended_reward(dense_r, binary_r, ema_success, threshold=0.10, temp=0.02):
     return (1.0 - alpha) * dense_r + alpha * binary_r
 
 
+def step_blended_reward(dense_r, binary_r, update_step, anneal_step_total):
+    """Linear in global update_step: alpha = min(1, step / T)."""
+    alpha = min(1.0, float(update_step) / max(float(anneal_step_total), 1.0))
+    return (1.0 - alpha) * dense_r + alpha * binary_r
+
+
+def apply_ablation_preset(args):
+    """论文消融 B0–B4：每次只开一个机制或全开（不含 solvable filter / diversity）。"""
+    if not args.ablation:
+        return
+    if not args.exp_id:
+        args.exp_id = args.ablation.lower()
+    a = args.ablation.upper()
+    # 先全部关闭再按组打开
+    args.lagrpo_len = False
+    args.reward_schedule = "fixed"
+    args.adv_clip = False
+    args.adv_clip_preserve_mean = True
+    if a == "B0":
+        pass
+    elif a == "B1":
+        args.lagrpo_len = True
+    elif a == "B2":
+        args.reward_schedule = "step_anneal"
+    elif a == "B3":
+        args.adv_clip = True
+    elif a in ("B4", "LAGRPO_FULL"):
+        args.lagrpo_len = True
+        args.reward_schedule = "step_anneal"
+        args.adv_clip = True
+    else:
+        raise ValueError(f"Unknown --ablation {args.ablation}")
+
+
 class MathDataset(Dataset):
     def __init__(self, data_file, tokenizer, env, max_samples=None,
                  filter_solvable=False):
@@ -102,7 +134,7 @@ class MathDataset(Dataset):
                 if solve_24_fast([n.strip() for n in ns.split(',')])
             ]
             after = len(raw_nums_list)
-            print(f"  🔍 Solvable filter: {before} → {after} problems "
+            print(f"  [filter] Solvable filter: {before} -> {after} problems "
                   f"({before - after} unsolvable removed)")
 
         for nums in raw_nums_list:
@@ -125,6 +157,7 @@ def get_per_token_logps(logits, input_ids):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="GRPO Training")
+    parser.set_defaults(adv_clip_preserve_mean=True)
 
     # ── 核心消融参数 ──
     parser.add_argument("--group-size", "-G", type=int, default=32,
@@ -171,18 +204,24 @@ def parse_args():
     parser.add_argument("--kl-high", type=float, default=4.0, help="KL 上界阈值 (适度放开以允许探索)")
     parser.add_argument("--kl-low", type=float, default=1.0, help="KL 下界阈值")
 
-    # ── 论文改进 1: Length-Aware Reward Normalization ──
+    # ── LAGRPO 空间维: 长度感知优势（减法，保持组内 ΣA=0）──
+    parser.add_argument("--lagrpo-len", action="store_true", default=False,
+                        help="启用论文长度项: A ← A - β_len * (L_i - L̄)/L̄")
+    parser.add_argument("--len-adv-beta", type=float, default=0.15,
+                        help="长度优势惩罚系数 β_len（与 KL 的 --beta 无关）")
     parser.add_argument("--length-norm", action="store_true", default=False,
-                        help="启用长度感知归一化: advantage *= mean_len / resp_len")
+                        help="[已弃用] 旧版乘法长度缩放；请改用 --lagrpo-len。若同时指定则仍生效旧逻辑")
 
     # ── 论文改进 2: Reward Schedule ──
     parser.add_argument("--reward-schedule", type=str, default="fixed",
-                        choices=["fixed", "dual", "anneal"],
-                        help="奖励调度。fixed=始终 dense; dual=硬切换; anneal=sigmoid 平滑退火")
+                        choices=["fixed", "dual", "anneal", "step_anneal"],
+                        help="fixed|dual|anneal(EMA+sigmoid 混合)|step_anneal(全局 update_step 线性混合)")
     parser.add_argument("--phase-switch-threshold", type=float, default=0.10,
                         help="Dual/Anneal: EMA 成功率阈值 (默认 0.10)")
     parser.add_argument("--anneal-temp", type=float, default=0.02,
                         help="Anneal: sigmoid 温度，越小切换越锐利 (默认 0.02)")
+    parser.add_argument("--anneal-step-total", type=int, default=200,
+                        help="step_anneal: 从纯 dense 到纯 binary 的 update 步数 T（线性 α=min(1,step/T)）")
     parser.add_argument("--ema-alpha", type=float, default=0.05,
                         help="EMA 平滑系数 (越小越平滑，默认 0.05)")
 
@@ -190,7 +229,17 @@ def parse_args():
     parser.add_argument("--adv-clip", action="store_true", default=False,
                         help="裁剪 advantage 到 [-adv_clip_range, +adv_clip_range]")
     parser.add_argument("--adv-clip-range", type=float, default=3.0,
-                        help="Advantage 裁剪范围 (默认 3.0 sigma)")
+                        help="Advantage 裁剪半宽 c（默认 3.0）")
+    parser.add_argument("--no-adv-clip-preserve-mean", action="store_false",
+                        dest="adv_clip_preserve_mean",
+                        help="默认裁剪后会减组内均值以恢复 ΣA=0；加此 flag 则关闭")
+
+    # ── 论文消融预设（覆盖上述开关）──
+    parser.add_argument("--ablation", type=str, default=None,
+                        choices=["B0", "B1", "B2", "B3", "B4", "lagrpo_full"],
+                        help="B0=GRPO; B1=+长度; B2=+步进退火; B3=+裁剪; B4=铁三角全开")
+    parser.add_argument("--exp-id", type=str, default="",
+                        help="实验标识，用于日志文件名 grpo_{exp_id}_G*")
 
     # ── 论文改进 4: Solvable-Only Filtering ──
     parser.add_argument("--filter-solvable", action="store_true", default=False,
@@ -206,13 +255,15 @@ def parse_args():
 
 
 def train(args):
+    apply_ablation_preset(args)
+
     G = args.group_size
     bs = args.batch_size
     accum = args.accum_steps
     B_eff = bs * G * accum
 
     print(f"\n{'='*60}")
-    print(f"  GRPO 训练配置")
+    print(f"  GRPO / LAGRPO 训练配置")
     print(f"{'='*60}")
     print(f"  G (group size)       = {G}")
     print(f"  batch_size           = {bs}")
@@ -223,22 +274,28 @@ def train(args):
     print(f"  epochs               = {args.epochs}")
     print(f"  data                 = {args.data_file}")
     print(f"  sft_path             = {args.sft_path}")
-    print(f"  length_norm          = {args.length_norm}")
+    print(f"  ablation             = {args.ablation}")
+    print(f"  lagrpo_len           = {args.lagrpo_len} (β_len={args.len_adv_beta})")
+    print(f"  length_norm_legacy   = {args.length_norm}")
     print(f"  reward_schedule      = {args.reward_schedule}")
-    print(f"  adv_clip             = {args.adv_clip} (range={args.adv_clip_range})")
+    print(f"  adv_clip             = {args.adv_clip} (range={args.adv_clip_range}, "
+          f"preserve_mean={args.adv_clip_preserve_mean})")
     print(f"  filter_solvable      = {args.filter_solvable}")
     if args.reward_schedule in ('dual', 'anneal'):
         print(f"  phase_switch_thresh  = {args.phase_switch_threshold}")
         print(f"  ema_alpha            = {args.ema_alpha}")
     if args.reward_schedule == 'anneal':
         print(f"  anneal_temp          = {args.anneal_temp}")
+    if args.reward_schedule == 'step_anneal':
+        print(f"  anneal_step_total    = {args.anneal_step_total}")
     print(f"{'='*60}\n")
 
     os.makedirs(args.log_dir, exist_ok=True)
     os.makedirs(args.output_dir, exist_ok=True)
 
     # ── 日志文件 ──
-    log_tag = f"grpo_G{G}"
+    exp_suffix = f"{args.exp_id}_" if args.exp_id else ""
+    log_tag = f"grpo_{exp_suffix}G{G}"
     mode = 'a' if args.resume_step > 0 else 'w'
     log_file = open(os.path.join(args.log_dir, f'{log_tag}_metrics.csv'), mode, newline='')
     csv_writer = csv.writer(log_file)
@@ -247,7 +304,8 @@ def train(args):
             "step", "success_rate", "policy_entropy",
             "kl_div", "mean_advantage", "adv_std", "grad_norm", "grad_second_moment", "mean_response_length",
             "vram_allocated_gb", "vram_peak_gb", "vram_reserved_gb",
-            "reward_phase", "ema_success_rate"
+            "reward_phase", "ema_success_rate",
+            "hallucination_rate", "mean_adv_sum_abs",
         ])
 
     response_file = open(os.path.join(args.log_dir, f'{log_tag}_responses.txt'), mode, encoding='utf-8')
@@ -265,10 +323,10 @@ def train(args):
     env = Arithmetic24Env()
     sft_path = args.sft_path
     if sft_path and not os.path.exists(sft_path):
-        print(f"⚠️  WARNING: SFT path '{sft_path}' does NOT exist! Falling back to fresh base model + LoRA.")
+        print(f"[WARN] SFT path '{sft_path}' does NOT exist! Falling back to fresh base model + LoRA.")
         sft_path = None
     elif sft_path:
-        print(f"✅ Found SFT checkpoint path: {sft_path}")
+        print(f"[OK] Found SFT checkpoint path: {sft_path}")
     model, tokenizer = load_model_and_tokenizer(model_name=args.model_name, with_value_head=False, lora_resume_path=sft_path)
     model.is_peft_model = True
 
@@ -305,7 +363,10 @@ def train(args):
     phase_switched = False      # dual 模式: 是否已切换过
     anneal_alpha = 0.0          # anneal 模式: 当前插值系数
 
-    metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0, "resp_len": 0.0}
+    metric_acc = {
+        "succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0, "resp_len": 0.0,
+        "halluc": 0.0, "adv_sum_abs": 0.0,
+    }
 
     for epoch in range(args.epochs):
         if training_done:
@@ -398,6 +459,17 @@ def train(args):
                                        temp=args.anneal_temp)
                         for d, b in zip(dense_rewards, binary_rewards)
                     ]
+                elif args.reward_schedule == 'step_anneal':
+                    dense_rewards, corrects = compute_rewards_parallel(
+                        [num_str] * G, responses
+                    )
+                    binary_rewards, _ = compute_rewards_parallel(
+                        [num_str] * G, responses, simple_mode='binary'
+                    )
+                    group_rewards_list = [
+                        step_blended_reward(d, b, update_step, args.anneal_step_total)
+                        for d, b in zip(dense_rewards, binary_rewards)
+                    ]
                 else:
                     # fixed / dual Phase 1: Dense continuous reward
                     group_rewards_list, corrects = compute_rewards_parallel(
@@ -409,17 +481,25 @@ def train(args):
                 std_r = group_rewards.std() + 1e-4  # 增大平滑项，防止极寒环境下的优势爆炸
                 advantages = (group_rewards - mean_r) / std_r
 
-                # ── 改进 3: Advantage Clipping ──
-                if args.adv_clip:
-                    advantages = torch.clamp(advantages, -args.adv_clip_range, args.adv_clip_range)
+                # ── LAGRPO 空间维: 长度感知减法（Σ_i (L_i - L̄)=0 ⇒ 组内优势之和不变）──
+                if args.lagrpo_len:
+                    resp_lengths = (resp_tensors != tokenizer.pad_token_id).float().sum(dim=1)
+                    mean_len = resp_lengths.mean().clamp(min=1.0)
+                    rel_len = (resp_lengths - mean_len) / mean_len
+                    advantages = advantages - args.len_adv_beta * rel_len
 
-                # ── 改进 1: Length-Aware Reward Normalization ──
-                # 消除 sequence-level advantage 广播到不同长度 response 时的隐性 length bias
-                # 原理: advantage *= (group_mean_len / per_response_len)
-                #   → 更长的 response 获得更小的 per-token advantage
+                # ── 方差维: 优势裁剪；可选减均值恢复 ΣA≈0 ──
+                if args.adv_clip:
+                    advantages = torch.clamp(
+                        advantages, -args.adv_clip_range, args.adv_clip_range
+                    )
+                    if args.adv_clip_preserve_mean:
+                        advantages = advantages - advantages.mean()
+
+                # ── 旧版乘法长度缩放（仅兼容历史实验；与论文 LAGRPO 不同）──
                 if args.length_norm:
                     resp_lengths = (resp_tensors != tokenizer.pad_token_id).float().sum(dim=1)
-                    mean_len = resp_lengths.mean()
+                    mean_len = resp_lengths.mean().clamp(min=1.0)
                     length_factor = mean_len / resp_lengths.clamp(min=1.0)
                     advantages = advantages * length_factor
 
@@ -465,6 +545,11 @@ def train(args):
                         old_log_probs = torch.cat(old_log_probs_list, dim=0)
                         ref_log_probs = torch.cat(ref_log_probs_list, dim=0)
 
+                halluc_count = sum(
+                    1 for r in responses
+                    if env.diagnose_output(num_str, r)["hallucination"]
+                )
+
                 rollouts.append({
                     "input_ids": input_ids,
                     "attention_mask": attention_mask,
@@ -476,7 +561,9 @@ def train(args):
                     "reward_mean": mean_r.item(),
                     "reward_std": group_rewards.std().item(),
                     "success_rate": corrects / G,
-                    "mean_resp_len": resp_lens
+                    "mean_resp_len": resp_lens,
+                    "hallucination_rate": halluc_count / max(G, 1),
+                    "adv_sum_abs": abs(float(advantages.sum().item())),
                 })
 
             # ── 优化阶段 ──
@@ -555,6 +642,8 @@ def train(args):
             metric_acc["kl"] += total_kl
             metric_acc["entropy"] += total_entropy
             metric_acc["resp_len"] += sum(r["mean_resp_len"] for r in rollouts) / len(rollouts)
+            metric_acc["halluc"] += sum(r["hallucination_rate"] for r in rollouts) / len(rollouts)
+            metric_acc["adv_sum_abs"] += sum(r["adv_sum_abs"] for r in rollouts) / len(rollouts)
 
             rollouts.clear()
 
@@ -597,12 +686,13 @@ def train(args):
 
                 # ── Reward Schedule: EMA 更新与自动切换 ──
                 ema_success = (1 - args.ema_alpha) * ema_success + args.ema_alpha * avg_succ
+                step_alpha = 0.0
 
                 if args.reward_schedule == 'dual':
                     if not phase_switched and ema_success >= args.phase_switch_threshold:
                         reward_phase = 'binary'
                         phase_switched = True
-                        print(f"\n  🔄 [Dual-Phase] 奖励模式切换: dense → binary "
+                        print(f"\n  [Dual-Phase] 奖励模式切换: dense -> binary "
                               f"(EMA_succ={ema_success:.3f} ≥ {args.phase_switch_threshold})")
 
                 if args.reward_schedule == 'anneal':
@@ -611,13 +701,23 @@ def train(args):
                     ))
                     reward_phase = f"anneal(α={anneal_alpha:.3f})"
 
+                if args.reward_schedule == 'step_anneal':
+                    step_alpha = min(
+                        1.0, float(update_step) / max(float(args.anneal_step_total), 1.0)
+                    )
+                    reward_phase = f"step_anneal(α={step_alpha:.3f})"
+
+                avg_halluc = metric_acc["halluc"] / accum
+                avg_adv_sum_abs = metric_acc["adv_sum_abs"] / accum
+
                 csv_writer.writerow([
                     update_step, avg_succ, avg_entropy, avg_kl,
                     avg_adv, avg_adv_std,
                     grad_norm.item() if hasattr(grad_norm, 'item') else grad_norm,
                     second_moment, avg_resp_len,
                     f"{vram_alloc:.2f}", f"{vram_peak:.2f}", f"{vram_reserved:.2f}",
-                    reward_phase, f"{ema_success:.4f}"
+                    reward_phase, f"{ema_success:.4f}",
+                    f"{avg_halluc:.5f}", f"{avg_adv_sum_abs:.6f}",
                 ])
                 log_file.flush()
 
@@ -626,19 +726,24 @@ def train(args):
                     phase_tag = f" [{reward_phase}]"
                 elif args.reward_schedule == 'anneal':
                     phase_tag = f" [anneal α={anneal_alpha:.3f}]"
+                elif args.reward_schedule == 'step_anneal':
+                    phase_tag = f" [step_anneal α={step_alpha:.3f}]"
 
                 print(f"Update {update_step} (Step {step}) | Succ: {avg_succ:.3f} | "
                       f"R: {avg_adv:.2f} | KL: {avg_kl:.4f} | |g|: {grad_norm:.4f} | β: {beta:.4f} | "
                       f"VRAM: {vram_alloc:.1f}/{vram_peak:.1f} GB{phase_tag}")
 
                 if update_step > 0 and update_step % args.save_every == 0:
-                    save_dir = os.path.join(args.output_dir, f"grpo_G{G}_update_{update_step}")
+                    save_dir = os.path.join(args.output_dir, f"{log_tag}_update_{update_step}")
                     os.makedirs(save_dir, exist_ok=True)
                     model.save_pretrained(save_dir)
                     tokenizer.save_pretrained(save_dir)
-                    print(f"  💾 Model saved → {save_dir}")
+                    print(f"  [save] Model saved -> {save_dir}")
 
-                metric_acc = {"succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0, "resp_len": 0.0}
+                metric_acc = {
+                    "succ": 0.0, "adv": 0.0, "adv_std": 0.0, "kl": 0.0, "entropy": 0.0, "resp_len": 0.0,
+                    "halluc": 0.0, "adv_sum_abs": 0.0,
+                }
                 update_step += 1
 
                 if args.max_steps and update_step >= args.max_steps:
@@ -648,7 +753,7 @@ def train(args):
 
 
     # ── 保存最终模型 ──
-    save_dir = os.path.join(args.output_dir, f"grpo_G{G}_final")
+    save_dir = os.path.join(args.output_dir, f"{log_tag}_final")
     os.makedirs(save_dir, exist_ok=True)
     model.save_pretrained(save_dir)
     tokenizer.save_pretrained(save_dir)
@@ -665,6 +770,13 @@ def train(args):
 
 
 if __name__ == "__main__":
+    import sys
+    if sys.platform == "win32":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     args = parse_args()
     print("=== GRPO 训练开始 ===")
     train(args)
