@@ -298,6 +298,34 @@ class Arithmetic24Env:
 
         return max(reward, -1.5), is_correct
 
+    def diagnose_output(self, input_nums_str, output_text):
+        """
+        训练/评估日志用：不改动奖励数值，仅返回可解释的统计标签。
+        hallucination: 思维链内出现「左边≠右边」等捏造等式（与 _evaluate_intermediate_steps 一致）
+        format_invalid: 多段闭合标签、最终式含非法字符等硬格式错误
+        """
+        target_nums = [n.strip() for n in input_nums_str.split(',')]
+        has_think_open, has_think_close, pred_expr, think_close_count, think_content = self._parse_output(
+            output_text
+        )
+
+        format_invalid = think_close_count > 1 or not pred_expr
+        if pred_expr and _RE_GARBAGE.search(pred_expr):
+            format_invalid = True
+
+        _, has_hallucination = self._evaluate_intermediate_steps(think_content)
+
+        is_correct = False
+        if pred_expr and not format_invalid:
+            ok, _, _ = self._verify_expression(pred_expr, target_nums)
+            is_correct = bool(ok)
+
+        return {
+            "hallucination": bool(has_hallucination),
+            "format_invalid": bool(format_invalid),
+            "correct": is_correct,
+        }
+
 # ── 模块级辅助函数（ProcessPoolExecutor 需要顶层可 pickle 的函数）──
 _global_env = None
 _global_simple_mode = True
