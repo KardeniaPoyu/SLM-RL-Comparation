@@ -165,11 +165,14 @@ def find_model_dirs(base_dir="saved_models"):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="论文最终评估")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base-model", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",
+                        help="基座模型名或本地路径")
+    parser.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",
+                        help="HuggingFace 模型名或本地路径")
     parser.add_argument("--models", nargs='+', type=str, default=None,
                         help="要评估的模型路径 (默认: 自动发现所有 *_final 模型)")
-    parser.add_argument("--test-file", type=str, default="data/test.csv",
-                        help="测试数据路径")
+    parser.add_argument("--test-file", type=str, default="data/test.csv")
     parser.add_argument("--n-samples", type=int, default=100,
                         help="每个难度的测试题数 (默认提升至: 100，充分评估)")
     parser.add_argument("--batch-size", type=int, default=16,
@@ -239,6 +242,7 @@ def main():
 
         try:
             model, tokenizer = load_model_and_tokenizer(
+                model_name=args.model_name,
                 lora_resume_path=model_dir,
                 with_value_head=False
             )

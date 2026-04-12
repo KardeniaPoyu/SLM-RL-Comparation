@@ -66,6 +66,8 @@ from model_utils import load_model_and_tokenizer
 
 def parse_args():
     parser = argparse.ArgumentParser(description="SFT Training")
+    parser.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",
+                        help="HuggingFace 模型名或本地路径")
     parser.add_argument("--data", type=str, default="data/sft_train.csv",
                         help="SFT 数据路径 (CSV 或 JSONL)")
     parser.add_argument("--output-dir", type=str, default="saved_models/sft_final")
@@ -101,7 +103,7 @@ def train_sft(args):
     os.makedirs(os.path.dirname(args.output_dir) or '.', exist_ok=True)
     os.makedirs(args.output_dir, exist_ok=True)
 
-    model, tokenizer = load_model_and_tokenizer(with_value_head=False)
+    model, tokenizer = load_model_and_tokenizer(model_name=args.model_name, with_value_head=False)
     model.is_peft_model = True
 
     prompts, responses = load_sft_data(args.data)

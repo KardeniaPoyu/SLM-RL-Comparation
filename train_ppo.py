@@ -136,6 +136,8 @@ def parse_args():
 
     # ── 训练控制 ──
     parser.add_argument("--max-new-tokens", type=int, default=512, help="生成最大长度 (需容纳 Long-CoT 的长思考过程)")
+    parser.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",
+                        help="HuggingFace 模型名或本地路径")
     parser.add_argument("--save-every", type=int, default=10)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--max-steps", type=int, default=200, help="最多更新的 step 数量，到达则停止训练并保存模型")
@@ -215,8 +217,9 @@ def train(args):
     # 1. Policy model (trainable): base 8-bit + LoRA + ValueHead
     print("\n[1/2] Loading policy model (with ValueHead)...")
     model, tokenizer = load_model_and_tokenizer(
-        with_value_head=True,
+        model_name=args.model_name,
         lora_resume_path=sft_path,
+        with_value_head=True,
         gradient_checkpointing=True
     )
     model.is_peft_model = True  # ValueHead.forward() 需要此属性 (LoRA 会跳过 PREFIX_TUNING 分支)

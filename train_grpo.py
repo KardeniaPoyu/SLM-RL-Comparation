@@ -151,6 +151,8 @@ def parse_args():
 
     # ── 路径 ──
     parser.add_argument("--data-file", type=str, default="data/train.csv", help="训练数据路径")
+    parser.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",
+                        help="HuggingFace 模型名或本地路径")
     parser.add_argument("--sft-path", type=str, default="saved_models/sft_final", help="SFT 预训练权重路径")
     parser.add_argument("--resume-step", type=int, default=0, help="从指定的 update_step 继续训练日志和步数统计")
     parser.add_argument("--output-dir", type=str, default="saved_models", help="模型保存目录")
@@ -193,6 +195,12 @@ def parse_args():
     # ── 论文改进 4: Solvable-Only Filtering ──
     parser.add_argument("--filter-solvable", action="store_true", default=False,
                         help="预过滤不可解题目 (利用穷举/回溯预判)")
+
+    # ── 论文改进 5: Intra-Group Diversity Bonus ──
+    parser.add_argument("--diversity-bonus", action="store_true", default=False,
+                        help="启用组内多样性奖励: 鼓励探索不同的算术路径")
+    parser.add_argument("--diversity-coef", type=float, default=0.01,
+                        help="多样性系数 (默认 0.01)")
 
     return parser.parse_args()
 
@@ -261,7 +269,7 @@ def train(args):
         sft_path = None
     elif sft_path:
         print(f"✅ Found SFT checkpoint path: {sft_path}")
-    model, tokenizer = load_model_and_tokenizer(with_value_head=False, lora_resume_path=sft_path)
+    model, tokenizer = load_model_and_tokenizer(model_name=args.model_name, with_value_head=False, lora_resume_path=sft_path)
     model.is_peft_model = True
 
     dataset = MathDataset(args.data_file, tokenizer, env,
@@ -414,6 +422,19 @@ def train(args):
                     mean_len = resp_lengths.mean()
                     length_factor = mean_len / resp_lengths.clamp(min=1.0)
                     advantages = advantages * length_factor
+
+                # ── 改进 5: Diversity Bonus ──
+                # 鼓励同一组样本探索不同的操作符组合。如果组内出现了更多样的计算路径，额外给一个全局奖金。
+                if args.diversity_bonus:
+                    def get_ops_fingerprint(resp):
+                        # 提取 </think> 后或全文中的操作符
+                        body = resp.split('</think>')[-1] if '</think>' in resp else resp
+                        return tuple(re_module.findall(r'[\+\-\*/]', body)[:3])
+
+                    unique_patterns = set(get_ops_fingerprint(r) for r in responses)
+                    # 规则: 唯一路径占比越高，bonus 越大
+                    diversity_ratio = len(unique_patterns) / max(len(responses), 1)
+                    advantages = advantages + args.diversity_coef * diversity_ratio
 
                 input_ids = group_out
                 attention_mask = (input_ids != tokenizer.pad_token_id).long()
