@@ -4,11 +4,11 @@ import time
 import argparse
 
 """
-run_all_experiments.py — 论文消融实验全自动运行流水线
-支持一键完成: SFT -> GRPO Baseline -> V-GRPO (Full Combo) -> Evaluation
+run_all_experiments.py — 快速对照: SFT -> GRPO 基线 -> LAGRPO (B4 铁三角) -> 评估
 
 用法:
     python run_all_experiments.py --model-name Qwen/Qwen2.5-0.5B-Instruct
+完整消融请用: python run_paper_ablations.py
 """
 
 def run_command(cmd, desc):
@@ -42,7 +42,7 @@ def main():
     model_name = args.model_name
     sft_out = "saved_models/sft_0.5b_local"
     grpo_base_out = "saved_models/grpo_baseline_0.5b"
-    grpo_v_out = "saved_models/grpo_vgrpo_0.5b"
+    grpo_lagrpo_out = "saved_models/grpo_lagrpo_0.5b"
 
     # 1. SFT 预热 (500 条数据, 4 epoch)
     if not args.skip_sft:
@@ -55,17 +55,20 @@ def main():
     if not run_command(grpo_base_cmd, "GRPO Baseline 训练 (G=4)"):
         return
 
-    # 3. V-GRPO (Full Combo: 长度归一/平滑退火/剪裁/过滤/多样性奖金)
-    v_grpo_cmd = (
+    # 3. LAGRPO 铁三角 (B4: 长度零和项 + 全局步退火 + 优势裁剪)
+    lagrpo_cmd = (
         f"python train_grpo.py --model-name {model_name} --sft-path {sft_out} "
-        f"--output-dir {grpo_v_out} --group-size 4 --max-steps {args.steps} "
-        f"--length-norm --reward-schedule anneal --adv-clip --filter-solvable --diversity-bonus"
+        f"--output-dir {grpo_lagrpo_out} --group-size 4 --max-steps {args.steps} "
+        f"--ablation B4 --anneal-step-total {max(args.steps, 1)}"
     )
-    if not run_command(v_grpo_cmd, "V-GRPO (全家桶优化版) 训练"):
+    if not run_command(lagrpo_cmd, "LAGRPO B4 训练"):
         return
 
     # 4. 最终评估对照
-    eval_cmd = f"python evaluate.py --base-model {model_name} --models {grpo_base_out}/grpo_G4_final {grpo_v_out}/grpo_G4_final --n-samples 50"
+    eval_cmd = (
+        f"python evaluate.py --base-model {model_name} "
+        f"--models {grpo_base_out}/grpo_G4_final {grpo_lagrpo_out}/grpo_b4_G4_final --n-samples 50"
+    )
     run_command(eval_cmd, "模型性能对比评估")
 
     print("\n" + "#"*60)
