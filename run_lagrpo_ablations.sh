@@ -25,27 +25,27 @@ echo "=================================================="
 # 1. B0: Baseline GRPO
 echo ""
 echo "── Step 1: B0 Baseline (Normal GRPO) ──"
-python train_grpo.py --model-name "$MODEL" --ablation B0 --group-size $G --max-steps $STEPS --sft-path $SFT --exp-id ablation_B0 --batch-size 1 --accum-steps 4
-3
+python train_grpo.py --model-name "$MODEL" --ablation B0 --group-size $G --max-steps $STEPS --sft-path $SFT --exp-id ablation_B0 --batch-size 2 --accum-steps 1 --max-new-tokens 300
+
 # 2. B1: + Length-Aware Reward (Space Dimension)
 echo ""
 echo "── Step 2: B1 Space (Length-Aware Advantage) ──"
-python train_grpo.py --model-name "$MODEL" --ablation B1 --group-size $G --max-steps $STEPS --sft-path $SFT --exp-id ablation_B1 --batch-size 1 --accum-steps 4
+python train_grpo.py --model-name "$MODEL" --ablation B1 --group-size $G --max-steps $STEPS --sft-path $SFT --exp-id ablation_B1 --batch-size 2 --accum-steps 1 --max-new-tokens 300
 
 # 3. B2: + Step Annealing (Time Dimension)
 echo ""
 echo "── Step 3: B2 Time (Reward Annealing) ──"
-python train_grpo.py --model-name "$MODEL" --ablation B2 --group-size $G --max-steps $STEPS --sft-path $SFT --exp-id ablation_B2 --batch-size 1 --accum-steps 4
+python train_grpo.py --model-name "$MODEL" --ablation B2 --group-size $G --max-steps $STEPS --sft-path $SFT --exp-id ablation_B2 --batch-size 2 --accum-steps 1 --max-new-tokens 300
 
 # 4. B3: + Adv Clipping (Variance Dimension)
 echo ""
 echo "── Step 4: B3 Variance (Advantage Clipping) ──"
-python train_grpo.py --model-name "$MODEL" --ablation B3 --group-size $G --max-steps $STEPS --sft-path $SFT --exp-id ablation_B3 --batch-size 1 --accum-steps 4
+python train_grpo.py --model-name "$MODEL" --ablation B3 --group-size $G --max-steps $STEPS --sft-path $SFT --exp-id ablation_B3 --batch-size 2 --accum-steps 1 --max-new-tokens 300
 
 # 5. B4: Full LAGRPO
 echo ""
 echo "── Step 5: B4 Full LAGRPO (Iron Triangle) ──"
-python train_grpo.py --model-name "$MODEL" --ablation B4 --group-size $G --max-steps $STEPS --sft-path $SFT --exp-id ablation_B4 --batch-size 1 --accum-steps 4
+python train_grpo.py --model-name "$MODEL" --ablation B4 --group-size $G --max-steps $STEPS --sft-path $SFT --exp-id ablation_B4 --batch-size 2 --accum-steps 1 --max-new-tokens 300
 
 # Final Evaluation
 echo ""
