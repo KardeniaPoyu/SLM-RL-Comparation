@@ -8,14 +8,14 @@ set -e
 
 # === 用户配置区 ===
 # 如果你的本地 7B 模型路径不同，请修改此处
-MODEL="Qwen/Qwen2.5-0.5B-Instruct"
+MODEL="Qwen/Qwen2.5-7B-Instruct"
 G=8
 STEPS=150
 SFT="saved_models/sft_final"
 # =================
 
 echo "=================================================="
-echo "  LAGRPO Iron Triangle Ablation Suite (0.5B)"
+echo "  LAGRPO Iron Triangle Ablation Suite (7B)"
 echo "  $(date)"
 echo "--------------------------------------------------"
 echo "Model: $MODEL"
