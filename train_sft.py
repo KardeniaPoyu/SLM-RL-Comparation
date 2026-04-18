@@ -162,7 +162,7 @@ def train_sft(args):
         bf16=True,
         max_grad_norm=1.0,
         dataloader_num_workers=0,
-        max_length=args.max_seq_length,
+        max_seq_length=args.max_seq_length,
         dataset_text_field="text",
     )
 
@@ -172,7 +172,7 @@ def train_sft(args):
         args=config,
         train_dataset=hf_dataset,
         data_collator=collator,
-        processing_class=tokenizer,
+        tokenizer=tokenizer,
     )
     trainer.train()
 
