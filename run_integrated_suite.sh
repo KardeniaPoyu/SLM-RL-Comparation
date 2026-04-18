@@ -106,7 +106,7 @@ if [ "$SKIP_GRPO_G" = false ]; then
     echo "── [4/6] 正在运行 GRPO 组大小消融 (G=4, 8, 16) ──"
     
     for G in 4 8 16; do
-        EXP_ID="grpo_G${G}"
+        EXP_ID="G${G}"
         echo "  → 启动 G=$G 训练..."
         python train_grpo.py \
             --model-name "$MODEL" \
@@ -140,7 +140,7 @@ if [ "$SKIP_LAGRPO" = false ]; then
             --max-steps "$STEPS" \
             --batch-size 2 \
             --accum-steps 1 \
-            --exp-id "lagrpo_${ABLATION}" \
+            --exp-id "${ABLATION}" \
             --save-every 50 \
             --log-dir "$LOG_DIR" \
             --output-dir saved_models/lagrpo_${ABLATION}_final
