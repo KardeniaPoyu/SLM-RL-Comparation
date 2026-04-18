@@ -27,6 +27,7 @@ def default_python_exe() -> str:
     if env and Path(env).exists():
         return env
     for candidate in (
+        Path(r"D:\venvs\SLM-RL-Comparation\Scripts\python.exe"),
         REPO_ROOT / ".venv_reasoning" / "Scripts" / "python.exe",
         REPO_ROOT / ".venv" / "Scripts" / "python.exe",
     ):
@@ -36,7 +37,7 @@ def default_python_exe() -> str:
 
 
 def run_cmd(py: str, args: list[str], cwd: Path) -> bool:
-    cmd = [py, *args]
+    cmd = [py, "-u", *args]
     print("\n" + "=" * 60)
     print("运行:", " ".join(cmd))
     print("=" * 60)
@@ -64,8 +65,14 @@ def main():
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
+    # 未显式设置时，将 HuggingFace 缓存放到 D 盘，避免系统盘损坏的 safetensors 导致加载失败
+    if not os.environ.get("HF_HOME"):
+        os.environ["HF_HOME"] = r"D:\hf_cache"
+        Path(os.environ["HF_HOME"]).mkdir(parents=True, exist_ok=True)
+
     py = default_python_exe()
     print(f"Python: {py}")
+    print(f"HF_HOME: {os.environ.get('HF_HOME')}")
 
     os.makedirs(args.train_out, exist_ok=True)
     os.makedirs(args.log_dir, exist_ok=True)
@@ -96,7 +103,7 @@ def main():
     elif sft_resolved.exists():
         print(f"使用已有 SFT: {args.sft_path}")
     elif args.skip_sft and not sft_resolved.exists():
-        print(f"❌ --skip-sft 但 SFT 不存在: {args.sft_path}")
+        print(f"[ERR] --skip-sft 但 SFT 不存在: {args.sft_path}")
         sys.exit(1)
 
     ablations = ["B0", "B1", "B2", "B3", "B4"]
@@ -131,7 +138,7 @@ def main():
             continue
 
         if not run_cmd(py, train_args, REPO_ROOT):
-            print(f"❌ 训练失败: {tag}")
+            print(f"[ERR] 训练失败: {tag}")
             sys.exit(1)
 
     if args.dry_run:
@@ -146,7 +153,7 @@ def main():
     # 仅评估本次消融产生的 final 目录（避免扫到历史模型）
     existing = [d for d in final_dirs if Path(d).exists()]
     if not existing:
-        print("❌ 未找到任何 *_final 目录，无法评估。")
+        print("[ERR] 未找到任何 *_final 目录，无法评估。")
         sys.exit(1)
 
     eval_cmd = [
@@ -162,7 +169,7 @@ def main():
     if not run_cmd(py, ["analyze_ablation.py", "--log-dir", args.log_dir, "--train-out", args.train_out], REPO_ROOT):
         sys.exit(1)
 
-    print("\n✅ 消融 + 评估 + 分析 全部完成。")
+    print("\n[OK] 消融 + 评估 + 分析 全部完成。")
     print(f"   指标 CSV: {args.log_dir}/grpo_*_metrics.csv")
     print(f"   汇总图: {args.log_dir}/ablation_*.png")
 

@@ -17,6 +17,7 @@ import random
 import re
 import argparse
 import ast
+import sys
 from fractions import Fraction
 from collections import defaultdict
 
@@ -360,8 +361,8 @@ def generate_cot_from_expr(expr_str, provided_digits=None):
 
 def main():
     parser = argparse.ArgumentParser(description="多难度24点数据生成器")
-    parser.add_argument("--n", nargs='+', type=int, default=[3, 4, 5, 6],
-                        help="要生成的 N 值列表（默认: 3 4 5 6）")
+    parser.add_argument("--n", nargs='+', type=int, default=[3, 4, 5],
+                        help="要生成的 N 值列表（默认: 3 4 5，N=6 求解极慢已移除）")
     parser.add_argument("--max-per-n", type=int, default=3000,
                         help="每个 N 最多生成多少条（默认: 3000 测试集极大化）")
     parser.add_argument("--sft", action="store_true",
@@ -543,4 +544,10 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     main()

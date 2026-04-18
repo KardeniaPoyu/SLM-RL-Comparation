@@ -59,8 +59,8 @@ echo ""
 # Step 1: 数据生成
 # ========================================
 if [ "$SKIP_DATA" = false ]; then
-    echo "── Step 1: 数据生成 (N=4, 经典24点) ──"
-    python data_gen_multi.py --n 4 --sft --sft-per-n 500
+    echo "── Step 1: 数据生成 (N=3,4,5) ──"
+    python data_gen_multi.py --n 3 4 5 --sft --sft-per-n 300
     echo ""
 fi
 
