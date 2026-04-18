@@ -162,7 +162,7 @@ def train_sft(args):
         bf16=True,
         max_grad_norm=1.0,
         dataloader_num_workers=0,
-        max_seq_length=args.max_seq_length,
+        max_length=args.max_seq_length,
         dataset_text_field="text",
     )
 
