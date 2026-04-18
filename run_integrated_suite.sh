@@ -50,7 +50,7 @@ echo ""
 # ---------------------------------------------------------
 echo "── [0/6] 检查并修复库兼容性 (TRL/Transformers) ──"
 # 强制安装稳定版本以适配现有代码 (避免 trl 1.x 的重大 Break)
-pip install trl==0.12.1 transformers==4.46.3 peft==0.12.0 accelerate==0.33.0 -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install trl==0.12.1 transformers==4.46.3 peft==0.12.0 accelerate==0.34.2 -i https://pypi.tuna.tsinghua.edu.cn/simple
 echo "✅ 环境恢复稳定 (TRL 0.12.1 + Transformers 4.46.3)"
 
 # ---------------------------------------------------------
