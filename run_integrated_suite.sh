@@ -84,9 +84,9 @@ if [ "$SKIP_PPO" = false ]; then
     echo ""
     echo "── [3/6] 正在运行 PPO 基线训练 ──"
     python train_ppo.py \
-        --model-id "$MODEL" \
-        --sft-model-path "$SFT_DIR" \
-        --train-file data/train.csv \
+        --model-name "$MODEL" \
+        --sft-path "$SFT_DIR" \
+        --data-file data/train.csv \
         --lr 2e-6 \
         --max-steps "$STEPS" \
         --batch-size 16 \
