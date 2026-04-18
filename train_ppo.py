@@ -246,7 +246,7 @@ def train(args):
         batch_size=args.batch_size,
         mini_batch_size=args.mini_batch_size,
         gradient_accumulation_steps=args.grad_accum_steps,
-        target_kl=args.target_kl,  # 使用命令行参数，不再硬编码
+        target=args.target_kl,  # 使用命令行参数，不再硬编码
         seed=42,
         ppo_epochs=args.ppo_epochs,
         init_kl_coef=args.init_kl_coef,
