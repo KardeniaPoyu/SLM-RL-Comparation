@@ -263,7 +263,7 @@ def train(args):
         config=config,
         model=model,
         ref_model=None,   # 先不传，初始化后注入
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         dataset=dataset,
         data_collator=collator
     )

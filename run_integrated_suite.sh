@@ -49,9 +49,9 @@ echo ""
 # Step 0: 检查并更新依赖 (针对 AutoDL 库版本不兼容修复)
 # ---------------------------------------------------------
 echo "── [0/6] 检查并修复库兼容性 (TRL/Transformers) ──"
-# 强制更新核心库以适配最新 API (如 SFTTrainer 的 processing_class)
-pip install --upgrade transformers peft trl accelerate -i https://pypi.tuna.tsinghua.edu.cn/simple
-echo "✅ 环境就绪"
+# 强制安装稳定版本以适配现有代码 (避免 trl 1.x 的重大 Break)
+pip install trl==0.12.1 transformers==4.46.3 peft==0.12.0 accelerate==0.33.0 -i https://pypi.tuna.tsinghua.edu.cn/simple
+echo "✅ 环境恢复稳定 (TRL 0.12.1 + Transformers 4.46.3)"
 
 # ---------------------------------------------------------
 # Step 1: 核心数据生成 (对齐 N=3,4,5)
