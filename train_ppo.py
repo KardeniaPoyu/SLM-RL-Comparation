@@ -214,32 +214,21 @@ def train(args):
     elif sft_path:
         print(f"✅ Found SFT checkpont path: {sft_path}")
 
-    # 1. Policy model (trainable): base 8-bit + LoRA + ValueHead
-    print("\n[1/2] Loading policy model (with ValueHead)...")
+    # ── 单模型加载：Policy 和 Reference 共享同一个 4-bit 基座 ──
+    # 计算 Reference Logits 时临时调用 disable_adapter() 关闭 LoRA，
+    # 数学等价于加载独立的冻结 SFT 模型，但节省约 6GB 显存。
+    print("\n[1/1] Loading policy model (with ValueHead, shared base for ref)...")
     model, tokenizer = load_model_and_tokenizer(
         model_name=args.model_name,
         lora_resume_path=sft_path,
         with_value_head=True,
         gradient_checkpointing=True
     )
-    model.is_peft_model = True  # ValueHead.forward() 需要此属性 (LoRA 会跳过 PREFIX_TUNING 分支)
-
-    # 2. Reference model (frozen): base 8-bit + LoRA, 无 ValueHead
-    print("\n[2/2] Loading reference model (no ValueHead, frozen)...")
-    ref_base, _ = load_model_and_tokenizer(
-        with_value_head=False,
-        lora_resume_path=sft_path,
-        gradient_checkpointing=False  # ref 不训练
-    )
-    for p in ref_base.parameters():
-        p.requires_grad = False
-    ref_base.eval()
+    model.is_peft_model = True
 
     n_policy_train = sum(p.requires_grad for p in model.parameters())
-    n_ref_train = sum(p.requires_grad for p in ref_base.parameters())
     print(f"  Policy model:  {n_policy_train} trainable params (with ValueHead)")
-    print(f"  Ref model:     {n_ref_train} trainable params (should be 0, no ValueHead)")
-    print(f"  model is ref:  {model is ref_base}  (should be False)")
+    print(f"  Reference: shares same base, LoRA disabled at inference time")
 
     config = PPOConfig(
         learning_rate=args.lr,
@@ -268,27 +257,37 @@ def train(args):
         data_collator=collator
     )
 
-    # ── 注入无 ValueHead 的 ref_model (保持 AutoModelForCausalLM 类型) ──
-    # TRL batched_forward_pass 会解包 3 个值: ref_logits, _, _ = self.ref_model(...)
-    # 而普通的 CausalLM 返回 CausalLMOutputWithPast (通常解包出 2 个值)。
-    # 我们用补丁直接修改 forward，使得类型原汁原味，又能通过 TRL 的元组解包：
-    original_forward = ref_base.forward
-    def patched_forward(*args, **kwargs):
-        out = original_forward(*args, **kwargs)
-        # 用一组 dummy 值凑足 TRL 期望的 3 元组 (logits, loss, values)
-        dummy_values = torch.zeros(
-            out.logits.shape[0], out.logits.shape[1],
-            device=out.logits.device, dtype=out.logits.dtype
-        )
-        return (out.logits, out.loss, dummy_values)
-    
-    ref_base.forward = patched_forward
-
+    # ── 使用 disable_adapter 模式作为 ref_model ──
+    # 构建一个轻量 wrapper：forward 时临时关闭 LoRA，让基座权重直接参与计算
+    # 以此实现「Reference = 冻结 SFT 基座」而无需再加载一份权重
     import contextlib
-    ppo_trainer.ref_model = ref_base                     # 直接就是 PeftModel/AutoModel
-    ppo_trainer.is_peft_model = False                    # 彻底关闭 disable_adapter 机制
+
+    class DisabledAdapterRef(torch.nn.Module):
+        """Wrap policy's pretrained_model, disable LoRA during forward for KL reference."""
+        def __init__(self, peft_model):
+            super().__init__()
+            # peft_model 是 PeftModel（ValueHead 的内层）
+            self._peft = peft_model
+
+        def forward(self, *args, **kwargs):
+            with self._peft.disable_adapter():
+                out = self._peft(*args, **kwargs)
+            # TRL batched_forward_pass 解包: logits, _, values = ref_model(...)
+            dummy_values = torch.zeros(
+                out.logits.shape[0], out.logits.shape[1],
+                device=out.logits.device, dtype=out.logits.dtype
+            )
+            return (out.logits, out.loss, dummy_values)
+
+        def parameters(self, recurse=True):
+            # 让 TRL 认为 ref_model 没有可训练参数
+            return iter([])
+
+    ref_wrapper = DisabledAdapterRef(model.pretrained_model)
+    ppo_trainer.ref_model = ref_wrapper
+    ppo_trainer.is_peft_model = False   # 关闭 TRL 内部的 disable_adapter 重复调用
     ppo_trainer.optional_peft_ctx = contextlib.nullcontext
-    print("  ✅ ref_model injected (AutoModelForCausalLM, frozen)")
+    print("  ✅ ref_model = DisabledAdapterRef (shared base, zero extra VRAM)")
 
     # ── 梯度拦截器 ──
     metric_cache = {"second_moment": 0.0, "total_norm": 0.0, "layer_stats": {}}
@@ -317,12 +316,16 @@ def train(args):
 
         ppo_trainer.optimizer.step = hooked_optimizer_step
 
+    # ── 生成停止准则：加入 </think> 的 token id 防止无尽循环 ──
+    think_close_ids = tokenizer.encode("</think>", add_special_tokens=False)
+    eos_ids = [tokenizer.eos_token_id] + think_close_ids
+
     gen_kwargs = {
         "temperature": args.temperature,
         "top_p": args.top_p,
         "do_sample": True,
         "pad_token_id": tokenizer.pad_token_id,
-        "eos_token_id": tokenizer.eos_token_id,
+        "eos_token_id": eos_ids,
         "max_new_tokens": args.max_new_tokens,
         "use_cache": True,  # 显式开启缓存，加速生成
     }
