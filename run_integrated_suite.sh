@@ -6,6 +6,7 @@
 # ==============================================================================
 
 set -e
+export OMP_NUM_THREADS=1  # Silence libgomp warnings and optimize CPU contention
 
 # === 用户配置区 ===
 MODEL="Qwen/Qwen2.5-7B-Instruct"
@@ -42,6 +43,15 @@ echo "  Model: $MODEL"
 echo "  Steps: $STEPS"
 echo "  Time:  $(date)"
 echo "=================================================="
+echo ""
+
+# ---------------------------------------------------------
+# Step 0: 检查并更新依赖 (针对 AutoDL 库版本不兼容修复)
+# ---------------------------------------------------------
+echo "── [0/6] 检查并修复库兼容性 (TRL/Transformers) ──"
+# 强制更新核心库以适配最新 API (如 SFTTrainer 的 processing_class)
+pip install --upgrade transformers peft trl accelerate -i https://pypi.tuna.tsinghua.edu.cn/simple
+echo "✅ 环境就绪"
 
 # ---------------------------------------------------------
 # Step 1: 核心数据生成 (对齐 N=3,4,5)

@@ -61,6 +61,7 @@ def _compat_torch_tensor(data, *args, **kwargs):
 torch.tensor = _compat_torch_tensor
 from datasets import Dataset
 from transformers import TrainingArguments
+from trl import SFTTrainer, SFTConfig
 from model_utils import load_model_and_tokenizer
 
 
@@ -149,7 +150,7 @@ def train_sft(args):
         response_template=response_template, tokenizer=tokenizer
     )
 
-    config = TrainingArguments(
+    config = SFTConfig(
         output_dir=args.output_dir + "_checkpoints",
         save_strategy="epoch",
         learning_rate=args.lr,
@@ -161,21 +162,18 @@ def train_sft(args):
         bf16=True,
         max_grad_norm=1.0,
         dataloader_num_workers=0,
-    )
-
-    from trl import SFTTrainer
-
-    trainer = SFTTrainer(
-        model=model,
-        args=config,
-        train_dataset=hf_dataset,
-        data_collator=collator,
-        tokenizer=tokenizer,
         max_seq_length=args.max_seq_length,
         dataset_text_field="text",
     )
 
     print(f"\n=== SFT 训练开始 ({args.epochs} epochs, lr={args.lr}) ===")
+    trainer = SFTTrainer(
+        model=model,
+        args=config,
+        train_dataset=hf_dataset,
+        data_collator=collator,
+        processing_class=tokenizer,
+    )
     trainer.train()
 
     trainer.model.save_pretrained(args.output_dir)
