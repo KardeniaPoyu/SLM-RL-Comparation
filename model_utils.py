@@ -6,7 +6,47 @@ model_utils.py — 模型加载工具
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"  # 防止 tokenizer 多线程抢占 CPU
 
+import json
+import shutil
+import inspect
 import torch
+def sanitize_lora_config(lora_path):
+    """
+    清理 adapter_config.json 中不被当前 LoraConfig 支持的非法键。
+    解决 'TypeError: LoraConfig.__init__() got an unexpected keyword argument' 问题。
+    """
+    config_file = os.path.join(lora_path, "adapter_config.json")
+    if not os.path.exists(config_file):
+        return
+
+    try:
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config_data = json.load(f)
+
+        # 获取当前 LoraConfig 构造函数支持的参数列表
+        import inspect
+        valid_keys = set(inspect.signature(LoraConfig.__init__).parameters.keys())
+        # PEFT 内部还可能使用一些基类参数或特殊映射，补全常见基础键
+        valid_keys.update(["peft_type", "auto_mapping", "base_model_name_or_path", "revision", "task_type", "inference_mode"])
+
+        original_keys = set(config_data.keys())
+        invalid_keys = original_keys - valid_keys
+
+        if invalid_keys:
+            print(f"  [sanitize] Found {len(invalid_keys)} invalid keys in LoRA config: {list(invalid_keys)}")
+            # 备份原文件
+            import shutil
+            backup_file = config_file + ".bak"
+            if not os.path.exists(backup_file):
+                shutil.copy(config_file, backup_file)
+            
+            # 过滤并保存
+            new_config = {k: v for k, v in config_data.items() if k in valid_keys}
+            with open(config_file, 'w', encoding='utf-8') as f:
+                json.dump(new_config, f, indent=2)
+            print(f"  [sanitize] Cleaned config saved to {config_file}")
+    except Exception as e:
+        print(f"  ⚠️ [sanitize] Failed to sanitize config: {e}")
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
@@ -55,6 +95,8 @@ def load_model_and_tokenizer(model_name="Qwen/Qwen2.5-7B-Instruct",
     if lora_resume_path and os.path.exists(lora_resume_path):
         from peft import PeftModel
         print(f"Resuming LoRA from {lora_resume_path}...")
+        # 自动清洗非标准配置参数
+        sanitize_lora_config(lora_resume_path)
         peft_model = PeftModel.from_pretrained(base_model, lora_resume_path, is_trainable=True)
     else:
         lora_config = LoraConfig(
