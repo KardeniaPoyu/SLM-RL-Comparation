@@ -25,7 +25,7 @@ echo "=================================================="
 # 1. B0: Baseline GRPO
 echo ""
 echo "── Step 1: B0 Baseline (Normal GRPO) ──"
-python train_grpo.py --model-name "$MODEL" --ablation B0 --group-size $G --max-steps $STEPS --sft-path $SFT --exp-id ablation_B0 --batch-size 2 --accum-steps 1 --max-new-tokens 512
+# python train_grpo.py --model-name "$MODEL" --ablation B0 --group-size $G --max-steps $STEPS --sft-path $SFT --exp-id ablation_B0 --batch-size 2 --accum-steps 1 --max-new-tokens 512
 
 # 2. B1: + Length-Aware Reward (Space Dimension)
 echo ""
