@@ -10,7 +10,7 @@ set -e
 # 如果你的本地 7B 模型路径不同，请修改此处
 MODEL="Qwen/Qwen2.5-7B-Instruct"
 G=8
-STEPS=150
+STEPS=100
 SFT="saved_models/sft_final"
 # =================
 
@@ -45,7 +45,7 @@ python train_grpo.py --model-name "$MODEL" --ablation B3 --group-size $G --max-s
 # 5. B4: Full LAGRPO
 echo ""
 echo "── Step 5: B4 Full LAGRPO (Iron Triangle) ──"
-python train_grpo.py --model-name "$MODEL" --ablation B4 --group-size $G --max-steps $STEPS --sft-path $SFT --exp-id ablation_B4 --batch-size 2 --accum-steps 1 --max-new-tokens 512
+# python train_grpo.py --model-name "$MODEL" --ablation B4 --group-size $G --max-steps $STEPS --sft-path $SFT --exp-id ablation_B4 --batch-size 2 --accum-steps 1 --max-new-tokens 512
 
 # Final Evaluation
 echo ""
