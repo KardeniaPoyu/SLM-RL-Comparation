@@ -178,7 +178,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
     parser.add_argument("--ppo-epochs", type=int, default=4, help="每次 rollout 的 PPO 更新轮数 (提高样本利用率)")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="生成最大长度 (需容纳 Long-CoT 的长思考过程)")
-    parser.add_argument("--save-every", type=int, default=10, help="每 N 个 update 保存一次")
+    parser.add_argument("--save-every", type=int, default=50, help="每 N 个 update 保存一次")
     parser.add_argument("--max-samples", type=int, default=None, help="限制训练样本数")
     parser.add_argument("--max-steps", type=int, default=200, help="最多更新的 update step 数量，到达则停止训练并保存模型")
 
